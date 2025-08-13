@@ -1,0 +1,18 @@
+services:
+  mic-bot-node:
+    build: .
+    container_name: mic-bot-node
+    restart: unless-stopped
+    volumes:
+      # Mount only the config file and the sessions directory
+      - ./src/config.json:/app/dist/config.json:ro
+      - ./sessions:/app/sessions
+    environment:
+      # Only timezone and Node environment are needed now
+      TZ: "Asia/Shanghai"
+      NODE_ENV: "production"
+    # Resource limits and security options remain good practice
+    mem_limit: 2g
+    cpus: 2
+    security_opt:
+      - no-new-privileges:true
