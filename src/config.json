@@ -4,7 +4,7 @@
     "headless": true,
     "parallel": false,
     "runOnZeroPoints": false,
-    "debug": false,
+    "debug": true,
     "saveFingerprint": {
         "mobile": false,
         "desktop": false
@@ -23,9 +23,9 @@
     "navigationTimeout": "120s",
     "apiServer": {
         "enabled": true,
-        "updateUrl": "https://bot.237890.xyz/",
-        "token":"ba1dd6019cd85bbd532edc6cdcba9df8983f565494671e7a",
-        "nodeName": "HNSB",
+        "updateUrl": "http://10.52.175.75:5001/",
+        "token":"bb5b5c6b5989477f21296bdcbb57c8f84269a718a350e525",
+        "nodeName": "test",
         "heartbeatInterval": "5m",
         "heartbeatTimeout": "10m"
     },

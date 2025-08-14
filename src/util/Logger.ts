@@ -11,7 +11,8 @@ export async function log(isMobile: boolean | 'main', title: string, message: st
         return;
     }
 
-    const currentTime = new Date().toLocaleString();
+    // 使用Asia/Shanghai时区格式化时间
+    const currentTime = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
     const platformText = isMobile === 'main' ? '主进程' : isMobile ? '移动端' : '桌面端';
     const chalkedPlatform = isMobile === 'main' ? chalk.bgCyan('主进程') : isMobile ? chalk.bgBlue('移动端') : chalk.bgMagenta('桌面端');
 

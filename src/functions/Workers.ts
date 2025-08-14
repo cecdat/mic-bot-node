@@ -17,6 +17,11 @@ export class Workers {
      * @param task 要执行的单个任务对象
      */
     async executeSingleTask(dashboardPage: Page, task: UnifiedTask) {
+        // 检查是否需要停止
+        if (this.bot.checkStopStatus()) {
+            this.bot.log(this.bot.isMobile, '活动执行', '检测到停止指令，终止当前任务', 'warn');
+            return;
+        }
         const activityInitial = dashboardPage.url();
         
         try {
@@ -54,6 +59,11 @@ export class Workers {
     }
     
     private async routeTaskToSolver(activityPage: Page, activity: UnifiedTask) {
+        // 检查是否需要停止
+        if (this.bot.checkStopStatus()) {
+            this.bot.log(this.bot.isMobile, '活动执行', '检测到停止指令，终止当前任务', 'warn');
+            return;
+        }
         switch (activity.promotionType) {
             case 'quiz':
                 switch (activity.pointProgressMax) {
@@ -109,6 +119,11 @@ export class Workers {
             await currentPage.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
             for (const activity of activitiesUncompleted) {
+                // 检查是否需要停止
+                if (this.bot.checkStopStatus()) {
+                    this.bot.log(this.bot.isMobile, '打卡任务', '检测到停止指令，终止打卡任务', 'warn');
+                    return;
+                }
                 await this.executeSingleTask(currentPage, activity);
             }
             

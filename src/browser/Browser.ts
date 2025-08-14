@@ -54,7 +54,12 @@ class Browser {
             fingerprint = sessionData.fingerprint ? sessionData.fingerprint : await this.generateFingerprint();
         }
 
-        const context = await newInjectedContext(browser, { fingerprint: fingerprint });
+        // 设置浏览器语言为中文
+        // 使用 newContextOptions 来设置 locale
+        const context = await newInjectedContext(browser, { 
+            fingerprint: fingerprint,
+            newContextOptions: { locale: 'zh-CN' }
+        });
 
         context.setDefaultTimeout(this.bot.utils.stringToMs(this.bot.config?.globalTimeout ?? 30000));
         await context.addCookies(sessionData.cookies);

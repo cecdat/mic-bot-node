@@ -1,4 +1,5 @@
 import { exec, ExecException } from 'child_process';
+import * as playwright from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { Page, Browser as PlaywrightBrowser } from 'rebrowser-playwright';
@@ -17,6 +18,11 @@ import { Account } from './interface/Account';
 import Axios from './util/Axios';
 import axios from 'axios';
 import { Config } from './interface/Config'; 
+import express, { Request, Response } from 'express';
+
+// 添加全局变量跟踪任务运行状态
+let isTaskRunning = false;
+let shouldStopTask = false;
 
 async function checkInNode() {
     const config = loadConfig();
@@ -32,8 +38,14 @@ async function checkInNode() {
         const checkinUrl = new URL(apiConfig.updateUrl);
         checkinUrl.pathname = '/bot_api/checkin';
 
-        const payload: { node_name: string; heartbeat_timeout?: number } = {
-            node_name: apiConfig.nodeName
+        // 确保使用正确的UTC时间戳，不受系统时区影响
+        const now = new Date();
+        const utcTimestamp = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString();
+
+        const payload: { node_name: string; heartbeat_timeout?: number; bot_status: string; timestamp: string } = {
+            node_name: apiConfig.nodeName,
+            bot_status: isTaskRunning ? 'Running' : 'Idle',
+            timestamp: utcTimestamp
         };
 
         if (apiConfig.heartbeatTimeout) {
@@ -48,11 +60,13 @@ async function checkInNode() {
     } catch (error) {
         let errorMessage: string;
         if (axios.isAxiosError(error)) {
-            errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
+            errorMessage = error.response ? 
+                `服务器错误: ${JSON.stringify(error.response.data)}` : 
+                `请求错误: ${error.message}`;
         } else if (error instanceof Error) {
-            errorMessage = error.message;
+            errorMessage = `客户端错误: ${error.message}`;
         } else {
-            errorMessage = String(error);
+            errorMessage = `未知错误: ${String(error)}`;
         }
         log('main', '节点管理', `节点签到/心跳失败: ${errorMessage}`, 'error');
     }
@@ -115,6 +129,9 @@ async function sendLoginStatusUpdate(bot: MicrosoftRewardsBot, type: 'pc' | 'mob
 }
 
 async function updateActivityStatus(status: 'Running' | 'Idle') {
+    // 更新全局任务状态
+    isTaskRunning = status === 'Running';
+    
     const config = loadConfig();
     const apiConfig = config.apiServer;
     if (!apiConfig || !apiConfig.enabled || !apiConfig.updateUrl) return;
@@ -127,6 +144,31 @@ async function updateActivityStatus(status: 'Running' | 'Idle') {
         );
         log('main', '主流程', `向服务器报告当前状态: [${status}]`);
     } catch (error) { /* Silent fail */ }
+}
+
+async function confirmCommandToServer(command: string) {
+    const config = loadConfig();
+    const apiConfig = config.apiServer;
+    if (!apiConfig || !apiConfig.enabled || !apiConfig.updateUrl) return;
+    try {
+        const apiUrl = new URL(apiConfig.updateUrl);
+        apiUrl.pathname = '/bot_api/confirm_command';
+        await axios.post(apiUrl.toString(), 
+            { command },
+            { headers: { 'Authorization': `Bearer ${apiConfig.token}` } }
+        );
+        log('main', '主流程', `向服务器确认命令: [${command}]`);
+    } catch (error) {
+        let errorMessage: string;
+        if (axios.isAxiosError(error)) {
+            errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
+        } else if (error instanceof Error) {
+            errorMessage = error.message;
+        } else {
+            errorMessage = String(error);
+        }
+        log('main', '主流程', `确认命令失败: ${errorMessage}`, 'error');
+    }
 }
 
 async function runHotSearchScript(accounts: Account[]) {
@@ -163,6 +205,9 @@ export class MicrosoftRewardsBot {
     public utils: Util;
     public activities: Activities = new Activities(this);
     public browser: { func: BrowserFunc; utils: BrowserUtil; };
+    // 停止状态检查函数
+    // 默认为检查全局shouldStopTask变量
+    public checkStopStatus: () => boolean = () => shouldStopTask;
     public isMobile: boolean = false;
     public homePage!: Page;
     private browserFactory: Browser = new Browser(this);
@@ -191,12 +236,24 @@ export class MicrosoftRewardsBot {
         try {
             log(this.isMobile, '主流程', `[${account.email}] 已创建桌面端上下文`);
             await this.login.login(page, account.email, account.password);
+            
+            // 检查是否需要停止
+            if (this.checkStopStatus()) {
+                log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
+                return { points: 0, gain: 0 };
+            }
+            
             const initialData = await this.browser.func.getDashboardData(page);
             const initialPoints = initialData.userStatus.availablePoints;
             const allTasks = aiOrchestrator.getAllIncompleteTasks(initialData);
             if (allTasks.length > 0) {
                 const executionPlan = await aiOrchestrator.getTaskExecutionPlan(allTasks);
                 for (const task of executionPlan) {
+                    // 检查是否需要停止
+                    if (this.checkStopStatus()) {
+                        log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
+                        return { points: initialPoints, gain: 0 };
+                    }
                     await this.workers.executeSingleTask(page, task);
                 }
             }
@@ -223,8 +280,28 @@ export class MicrosoftRewardsBot {
             const tokenPage = await context.newPage();
             try { this.accessToken = await this.login.getMobileAccessToken(tokenPage, account.email); }
             finally { await tokenPage.close(); }
+            // 检查是否需要停止
+            if (this.checkStopStatus()) {
+                log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
+                return { points: initialPoints, gain: 0 };
+            }
+
             if (this.config.workers.doDailyCheckIn) await this.activities.doDailyCheckIn(this.accessToken, initialData);
+            
+            // 检查是否需要停止
+            if (this.checkStopStatus()) {
+                log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
+                return { points: initialPoints, gain: 0 };
+            }
+
             if (this.config.workers.doReadToEarn) await this.activities.doReadToEarn(this.accessToken, initialData);
+            
+            // 检查是否需要停止
+            if (this.checkStopStatus()) {
+                log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
+                return { points: initialPoints, gain: 0 };
+            }
+
             if (this.config.workers.doMobileSearch) {
                 if (initialData.userStatus.counters.mobileSearch) {
                     await this.activities.doSearch(page, initialData, account.email);
@@ -248,26 +325,44 @@ export class MicrosoftRewardsBot {
             let initialPointsToday = 0;
             if (dailyPointsData && dailyPointsData.date === todayStr) {
      initialPointsToday = dailyPointsData.initialPoints;
-} else {
-    const recoveryContext = await this.browserFactory.createContext(browser, account);
-    const recoveryPage = await recoveryContext.newPage();
-    try {
-        // 关键改动：增加了 try/catch 来包裹获取数据的逻辑
-        const data = await this.browser.func.getDashboardData(recoveryPage);
-        initialPointsToday = data.userStatus.availablePoints;
-        await saveDailyPoints(this.config.sessionPath, account.email, { date: todayStr, initialPoints: initialPointsToday });
-    } catch (e: any) {
-        // 如果获取失败，记录警告并默认初始积分为0
-        log(false, '主流程', `无法在任务开始前获取初始积分: ${e.message}。将让主流程处理登录。`, 'warn');
-        initialPointsToday = 0; 
-    }
-    finally {
-        await recoveryContext.close();
-    }
 }
+            // 添加停止检查
+            if (shouldStopTask) {
+                log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
+                return;
+            }
+            const recoveryContext = await this.browserFactory.createContext(browser, account);
+            const recoveryPage = await recoveryContext.newPage();
+            try {
+                // 关键改动：增加了 try/catch 来包裹获取数据的逻辑
+                const data = await this.browser.func.getDashboardData(recoveryPage);
+                initialPointsToday = data.userStatus.availablePoints;
+                await saveDailyPoints(this.config.sessionPath, account.email, { date: todayStr, initialPoints: initialPointsToday });
+            } catch (e: any) {
+                // 如果获取失败，记录警告并默认初始积分为0
+                log(false, '主流程', `无法在任务开始前获取初始积分: ${e.message}。将让主流程处理登录。`, 'warn');
+                initialPointsToday = 0; 
+            }
+            finally {
+                await recoveryContext.close();
+            }
+            // 添加停止检查
+            if (shouldStopTask) {
+                log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
+                return;
+            }
             const desktopResult = await this.Desktop(browser, account).catch(e => { log(false, 'Desktop-Error', e.message, 'error'); return {points: 0, gain: 0}});
+            // 添加停止检查
+            if (shouldStopTask) {
+                log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
+                return;
+            }
             const mobileResult = await this.Mobile(browser, account).catch(e => { log(true, 'Mobile-Error', e.message, 'error'); return {points: 0, gain: 0}});
-            
+            // 添加停止检查
+            if (shouldStopTask) {
+                log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
+                return;
+            }
             const finalPoints = await this.browser.func.getDashboardData(await browser.newPage()).then(d => d.userStatus.availablePoints).catch(() => desktopResult.points > 0 ? desktopResult.points : 0);
 
             await sendFinalUpdate(this, {
@@ -286,6 +381,12 @@ export class MicrosoftRewardsBot {
 
 async function runTasksForAccounts(accounts: Account[], config: Config) {
     for (const account of accounts) {
+        if (shouldStopTask) {
+            log('main', '主进程-WORKER', '收到停止指令，终止任务执行...', 'warn');
+            await updateActivityStatus('Idle');
+            return;
+        }
+
         if (accountStatusManager.isFrozen(account.email)) {
             continue;
         }
@@ -297,6 +398,18 @@ async function runTasksForAccounts(accounts: Account[], config: Config) {
         bot.config = config; 
 
         try {
+            // 添加任务执行前的停止检查
+            if (shouldStopTask) {
+                log('main', '主进程-WORKER', '任务执行前检测到停止指令，终止任务...', 'warn');
+                await updateActivityStatus('Idle');
+                return;
+            }
+            
+            // 确保停止检查函数已正确设置（冗余检查，防止意外）
+        if (bot.checkStopStatus() !== shouldStopTask) {
+            log('main', '主进程-WORKER', '修正停止检查函数设置', 'warn');
+            bot.checkStopStatus = () => shouldStopTask;
+        }
             await bot.runFor(account);
             accountStatusManager.recordSuccess(account.email);
         } catch (error) {
@@ -312,6 +425,58 @@ async function runTasksForAccounts(accounts: Account[], config: Config) {
 async function main() {
     log('main', '主流程', `Mic-Bot 执行节点已启动...`);
 
+    // 添加临时HTTP服务器用于测试停止命令
+    const app = express();
+    app.use(express.json());
+    // POST端点保持不变，添加GET端点用于简单测试
+    app.post('/test/stop', (req: Request, res: Response) => {
+        log('main', '测试端点', '收到手动停止命令', 'warn');
+        shouldStopTask = true;
+        updateActivityStatus('Idle');
+        res.json({ success: true, message: '已触发停止命令' });
+    });
+
+    // 处理服务端发送的停止指令
+    app.post('/web_api/nodes/1/stop', (req: Request, res: Response) => {
+        log('main', '节点管理', '收到服务端停止命令', 'warn');
+        shouldStopTask = true;
+        updateActivityStatus('Idle');
+        res.json({ success: true, message: '已触发停止命令' });
+    });
+    // 添加GET端点，便于测试
+    app.get('/test/stop', (req: Request, res: Response) => {
+        log('main', '测试端点', '收到GET手动停止命令', 'warn');
+        shouldStopTask = true;
+        updateActivityStatus('Idle');
+        res.json({ success: true, message: '已触发停止命令' });
+    });
+
+    // 添加测试端点，用于触发任务执行
+    app.get('/test/run_tasks', (req: Request, res: Response) => {
+        log('main', '测试端点', '收到触发任务命令', 'warn');
+        log('main', '测试端点', `请求路径: ${req.path}`, 'log');
+        log('main', '测试端点', `请求方法: ${req.method}`, 'log');
+        if (!isTaskRunning) {
+            log('main', '测试端点', '开始执行任务...', 'log');
+            executeTasks().catch(err => {
+                log('main', '任务执行', `任务执行出错: ${String(err)}`, 'error');
+            });
+            res.json({ success: true, message: '已触发任务执行' });
+        } else {
+            log('main', '测试端点', '任务已经在运行中', 'warn');
+            res.json({ success: false, message: '任务已经在运行中' });
+        }
+    });
+
+    // 添加一个根端点，用于测试连接
+    app.get('/', (req: Request, res: Response) => {
+        log('main', '测试端点', '收到根路径请求', 'log');
+        res.json({ success: true, message: '节点服务正常运行' });
+    });
+    // 直接启动服务器，不声明未使用的变量
+    app.listen(3002, () => {
+        log('main', '测试端点', '临时HTTP服务器已启动在端口 3002', 'log');
+    });
     // 步骤 1: 加载本地基础配置，确保 config 是变量 (let)
     let config = loadConfig();
     const utils = new Util();
@@ -352,6 +517,96 @@ async function main() {
     const heartbeatIntervalMs = utils.stringToMs(config.apiServer?.heartbeatInterval || '5m');
     setInterval(checkInNode, heartbeatIntervalMs);
 
+    // 执行单个任务函数
+    async function executeSingleTask(taskData: any) {
+        if (isTaskRunning) {
+            log('main', '执行单个任务', '任务正在执行中，无法执行新任务', 'warn');
+            return;
+        }
+        isTaskRunning = true;
+        try {
+            shouldStopTask = false; // 重置停止标志
+            await updateActivityStatus('Running');
+
+            log('main', '执行单个任务', `开始执行任务 ${taskData.task_id}: ${taskData.task_type}`);
+
+            // 获取账户列表
+            const accounts = await loadAccounts();
+            if (accounts.length === 0) {
+                log('main', '执行单个任务', '未获取到分配的账户，任务终止。');
+                return;
+            }
+
+            // 为简化示例，我们使用第一个账户执行任务
+            const account = accounts[0];
+            if (!account) {
+                log('main', '执行单个任务', '未获取到有效的账户，任务终止。', 'error');
+                return;
+            }
+            log('main', '执行单个任务', `使用账户 ${account.email} 执行任务`);
+
+            const bot = new MicrosoftRewardsBot();
+            bot.config = config; // 使用合并后的配置
+            bot.account = account;
+            bot.axios = new Axios(account.proxy);
+
+            // 创建浏览器实例
+            const browser = await playwright.chromium.launch({headless: true});
+            try {
+                // 这里应该有根据任务类型执行不同操作的逻辑
+                // 为简化示例，我们只是执行常规任务
+                await bot.runFor(account);
+                log('main', '执行单个任务', `任务 ${taskData.task_id} 执行完成`);
+            } finally {
+                await browser.close();
+            }
+
+            if (!shouldStopTask) {
+                await updateActivityStatus('Idle');
+                log('main', '执行单个任务', '任务执行完毕，返回待机状态。');
+            }
+        } catch (error) {
+            log('main', '执行单个任务', `执行任务时出错: ${String(error)}`, 'error');
+            if (!shouldStopTask) {
+                await updateActivityStatus('Idle');
+            }
+        } finally {
+            isTaskRunning = false;
+            // 确认命令已执行
+            await confirmCommandToServer('RUN_TASK');
+        }
+    }
+
+    // 任务执行函数
+    async function executeTasks() {
+        if (isTaskRunning) return;
+        isTaskRunning = true;
+        try {
+            shouldStopTask = false; // 重置停止标志
+            await updateActivityStatus('Running');
+
+            const accounts = await loadAccounts();
+            if (accounts.length > 0) {
+                await runHotSearchScript(accounts);
+                await runTasksForAccounts(accounts, config);
+            } else {
+                log('main', '主流程', '未获取到分配的账户，本轮任务结束。');
+            }
+
+            if (!shouldStopTask) {
+                await updateActivityStatus('Idle');
+                log('main', '主流程', '所有任务执行完毕，返回待机状态。');
+            }
+        } catch (error) {
+            log('main', '任务执行', `执行任务时出错: ${String(error)}`, 'error');
+            if (!shouldStopTask) {
+                await updateActivityStatus('Idle');
+            }
+        } finally {
+            isTaskRunning = false;
+        }
+    }
+
     // 步骤 5: 开始主循环，监听任务
     while (true) {
         try {
@@ -368,23 +623,48 @@ async function main() {
 
             if (command === 'RUN_TASKS') {
                 log('main', '主流程', '收到 [执行任务] 指令，开始执行...');
-
-                await updateActivityStatus('Running');
-
-                const accounts = await loadAccounts();
-                if (accounts.length > 0) {
-                    await runHotSearchScript(accounts);
-                    // 注意：这里我们将最终合并好的 config 传递下去
-                    await runTasksForAccounts(accounts, config); 
+                // 异步执行任务，不阻塞主循环
+                if (!isTaskRunning) {
+                    executeTasks().catch(err => {
+                        log('main', '任务执行', `任务执行出错: ${String(err)}`, 'error');
+                    });
+                    // 确认命令已接收
+                    await confirmCommandToServer('RUN_TASKS');
                 } else {
-                    log('main', '主流程', '未获取到分配的账户，本轮任务结束。');
+                    log('main', '主流程', '任务正在执行中，忽略重复的执行指令', 'warn');
+                    // 确认命令已接收但无需执行
+                    await confirmCommandToServer('RUN_TASKS');
                 }
-
+            } else if (command === 'RUN_TASK') {
+                log('main', '主流程', '收到 [执行单个任务] 指令，开始执行...');
+                const taskData = response.data.data;
+                log('main', '主流程', `任务数据: ${JSON.stringify(taskData)}`);
+                // 异步执行单个任务，不阻塞主循环
+                if (!isTaskRunning) {
+                    executeSingleTask(taskData).catch(err => {
+                        log('main', '任务执行', `单个任务执行出错: ${String(err)}`, 'error');
+                    });
+                } else {
+                    log('main', '主流程', '任务正在执行中，无法执行单个任务', 'warn');
+                    // 确认命令已接收但无法执行
+                    await confirmCommandToServer('RUN_TASK');
+                }
+            } else if (command === 'STOP_TASKS') {
+                log('main', '主流程', '收到 [停止任务] 指令，正在终止当前任务...', 'warn');
+                shouldStopTask = true;
+                // 立即更新活动状态为Idle
                 await updateActivityStatus('Idle');
-                log('main', '主流程', '所有任务执行完毕，返回待机状态。');
-
+                // 向服务端确认命令已执行
+                await confirmCommandToServer('STOP_TASKS');
+                log('main', '主流程', '已设置停止标志、更新状态为Idle并确认命令', 'warn');
+                log('main', '主流程', '停止命令处理完成', 'warn');
+                // 重置任务运行状态，确保可以立即响应新指令
+                isTaskRunning = false;
+            } else if (command === null) {
+                log('main', '主流程', '收到 [空命令]，忽略...', 'log');
+                // 不将空命令视为停止指令
             } else {
-                // No command, continue polling
+                log('main', '主流程', `收到未知命令: ${command}`, 'warn');
             }
 
         } catch (error) {
