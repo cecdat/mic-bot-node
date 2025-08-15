@@ -443,6 +443,20 @@ async function main() {
     let config = loadConfig();
     const utils = new Util();
 
+    // 确保 searchSettings 总是有默认值
+    if (!config.searchSettings) {
+        config.searchSettings = {
+            useGeoLocaleQueries: true,
+            scrollRandomResults: true,
+            clickRandomResults: true,
+            retryMobileSearchAmount: 3,
+            searchDelay: {
+                min: '2s',
+                max: '5s'
+            }
+        };
+    }
+
     try {
         // 步骤 2: 尝试从远端加载扁平化的节点配置
         const nodeConfig = await loadNodeConfig();
