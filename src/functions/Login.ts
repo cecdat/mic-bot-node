@@ -44,8 +44,10 @@ export class Login {
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 开始登录流程！`);
             await this.gotoWithRetry(page, 'https://rewards.bing.com/signin');
             await page.waitForLoadState('domcontentloaded').catch(() => { });
-            // 截图：初始登录页面
-            await this.saveSnapshot(page, email, `initial_login_page_${Date.now()}.html`);
+            // 截图：初始登录页面（受 snapshots.login 开关控制）
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `initial_login_page_${Date.now()}.html`);
+            }
             await this.bot.browser.utils.reloadBadPage(page);
             await this.checkAccountLocked(page, email);
             const isLoggedIn = await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 10000 }).then(() => true).catch(() => false);
@@ -77,34 +79,44 @@ export class Login {
         try {
             await this.enterEmail(page, email);
             // 截图：邮箱输入后页面
-            await this.saveSnapshot(page, email, `email_entered_page_${Date.now()}.html`);
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `email_entered_page_${Date.now()}.html`);
+            }
             await this.bot.utils.wait(3000);
             await this.bot.browser.utils.reloadBadPage(page);
             await this.bot.utils.wait(2000);
 
-            // [最终修复方案 - 基于HTML快照分析]
-            this.bot.log(this.bot.isMobile, '登录', '正在检查“Use your password”登录选项...');
-            
-            // 根据快照，按钮的文本是英文的 "Use your password"
-            const usePasswordButton = page.getByRole('button', { name: 'Use your password', exact: true });
-            
-            try {
-                // 等待按钮出现，如果7秒内没出现则认为不需要此步骤
-                await usePasswordButton.waitFor({ state: 'visible', timeout: 7000 });
+            // [新增] 首先检查是否已经直接跳转到密码输入页面
+            this.bot.log(this.bot.isMobile, '登录', '检查是否已直接跳转到密码输入页面...');
+            const passwordInputDirect = await page.waitForSelector('input[type="password"]', { timeout: 5000 }).catch(() => null);
+            if (passwordInputDirect) {
+                this.bot.log(this.bot.isMobile, '登录', '检测到密码输入框，跳过"使用密码"步骤');
+            } else {
+                // [最终修复方案 - 基于HTML快照分析]
+                this.bot.log(this.bot.isMobile, '登录', '正在检查"使用密码"登录选项...');
                 
-                this.bot.log(this.bot.isMobile, '登录', '检测到“Use your password”选项，正在点击...');
-                await usePasswordButton.click();
-                await this.bot.utils.wait(3000); // 等待页面跳转
+                // 根据快照，按钮的文本是英文的 "Use your password"
+                const usePasswordButton = page.getByRole('button', { name: 'Use your password', exact: true });
+                
+                try {
+                    // 等待按钮出现，如果7秒内没出现则认为不需要此步骤
+                    await usePasswordButton.waitFor({ state: 'visible', timeout: 7000 });
+                    
+                    this.bot.log(this.bot.isMobile, '登录', '检测到"使用密码"选项，正在点击...');
+                    await usePasswordButton.click();
+                    await this.bot.utils.wait(3000); // 等待页面跳转
 
-            } catch (e) {
-                // 如果按钮未出现，这是正常情况，直接继续
-                this.bot.log(this.bot.isMobile, '登录', '未找到“Use your password”按钮，将直接尝试输入密码。');
+                } catch (e) {
+                    // 如果按钮未出现，这是正常情况，直接继续
+                    this.bot.log(this.bot.isMobile, '登录', '未找到"使用密码"按钮，将直接尝试输入密码。');
+                }
             }
-            // [修复结束]
 
             await this.enterPassword(page, password);
             // 截图：密码输入后页面
-            await this.saveSnapshot(page, email, `password_entered_page_${Date.now()}.html`);
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `password_entered_page_${Date.now()}.html`);
+            }
             await this.checkLoggedIn(page, email);
             await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '登录成功');
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功登录到微软账户`);
@@ -313,14 +325,18 @@ export class Login {
             await Promise.race([navigationPromise, intermediatePageHandler]);
 
             // 截图：登录成功后页面
-            await this.saveSnapshot(page, email, `post_login_snapshot_${Date.now()}.html`);
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `post_login_snapshot_${Date.now()}.html`);
+            }
             await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 10000 });
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功登录到奖励门户`);
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 验证登录状态时超时或失败: ${errorMessage}`, 'error');
             // 截图：登录失败页面
-            await this.saveSnapshot(page, email, `login_failure_snapshot_${Date.now()}.html`);
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `login_failure_snapshot_${Date.now()}.html`);
+            }
             throw new Error(`[${email}] 验证登录状态失败: ${errorMessage}`);
         }
     }
@@ -375,83 +391,157 @@ export class Login {
         
         if (pageTitle.includes("验证你的电子邮件") || await verifyEmailTitle.isVisible({ timeout: 2000 })) {
             // 截图：验证电子邮件页面
-            await this.saveSnapshot(page, email, `verify_email_page_${Date.now()}.html`);
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到“验证电子邮件”页面`);
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `verify_email_page_${Date.now()}.html`);
+            }
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到"验证电子邮件"页面`);
             await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.VerificationRequired, '需要邮件验证');
-            // 尝试找到并点击"使用密码"选项（支持多种元素类型和文本变体）
-            // 1. 首先尝试直接匹配包含'使用密码'的所有可见元素
-            // 扩大匹配范围，包含更多可能的文本变体和元素类型
-            const usePasswordOptions = page.locator(
-                'div:has-text("已收到代码？") + div >> *, '
-                + 'div:has-text("Already have a code?") + div >> *, '
-                + '*:has-text("使用密码"), *:has-text("Use your password"), '
-                + '*:has-text("密码登录"), *:has-text("Password login"), '
-                + '*:has-text("账号密码登录"), *:has-text("Sign in with password")'
-            ).filter({ visible: true });
-
-            // 增加超时时间并添加详细日志
-            if (await usePasswordOptions.isVisible({ timeout: 8000 })) {
-                // 输出所有匹配元素的文本，用于调试
-                const optionsCount = await usePasswordOptions.count();
-                for (let i = 0; i < optionsCount; i++) {
-                    const text = await usePasswordOptions.nth(i).textContent();
-                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 找到匹配元素 ${i+1}/${optionsCount}: ${text}`, 'log');
+            
+            // 新增：更精确的选择器策略
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 正在寻找"使用密码"选项...`);
+            
+            // 方法1：使用role="button"选择器（针对HTML快照中看到的元素）
+            const usePasswordRoleButton = page.locator('[role="button"]:has-text("使用密码"), [role="button"]:has-text("Use your password")');
+            
+            // 方法2：使用span标签选择器
+            const usePasswordSpan = page.locator('span:has-text("使用密码"), span:has-text("Use your password")');
+            
+            // 方法3：使用更宽松的文本匹配
+            const usePasswordAny = page.locator('*:has-text("使用密码"), *:has-text("Use your password"), *:has-text("密码登录"), *:has-text("Password login")');
+            
+            let clicked = false;
+            
+            // 尝试方法1：role="button"
+            try {
+                const count1 = await usePasswordRoleButton.count();
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 找到 ${count1} 个role="button"类型的"使用密码"元素`);
+                
+                for (let i = 0; i < count1 && !clicked; i++) {
+                    const element = usePasswordRoleButton.nth(i);
+                    if (await element.isVisible({ timeout: 2000 })) {
+                        this.bot.log(this.bot.isMobile, '登录', `[${email}] 尝试点击第 ${i+1} 个role="button"元素`);
+                        await element.scrollIntoViewIfNeeded();
+                        await element.click({ timeout: 5000 });
+                        clicked = true;
+                        this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功点击role="button"类型的"使用密码"选项`);
+                        break;
+                    }
                 }
-                // 确保元素在视口中
-                await usePasswordOptions.first().scrollIntoViewIfNeeded();
-                await usePasswordOptions.first().click();
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 点击了匹配的'使用密码'选项`, 'log');
-                await this.bot.utils.wait(3000);
-                return;
+            } catch (error) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 方法1失败: ${error instanceof Error ? error.message : String(error)}`, 'warn');
+            }
+            
+            // 如果方法1失败，尝试方法2：span标签
+            if (!clicked) {
+                try {
+                    const count2 = await usePasswordSpan.count();
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 找到 ${count2} 个span类型的"使用密码"元素`);
+                    
+                    for (let i = 0; i < count2 && !clicked; i++) {
+                        const element = usePasswordSpan.nth(i);
+                        if (await element.isVisible({ timeout: 2000 })) {
+                            this.bot.log(this.bot.isMobile, '登录', `[${email}] 尝试点击第 ${i+1} 个span元素`);
+                            await element.scrollIntoViewIfNeeded();
+                            await element.click({ timeout: 5000 });
+                            clicked = true;
+                            this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功点击span类型的"使用密码"选项`);
+                            break;
+                        }
+                    }
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 方法2失败: ${error instanceof Error ? error.message : String(error)}`, 'warn');
+                }
+            }
+            
+            // 如果方法2失败，尝试方法3：宽松匹配
+            if (!clicked) {
+                try {
+                    const count3 = await usePasswordAny.count();
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 找到 ${count3} 个宽松匹配的"使用密码"元素`);
+                    
+                    for (let i = 0; i < count3 && !clicked; i++) {
+                        const element = usePasswordAny.nth(i);
+                        if (await element.isVisible({ timeout: 2000 })) {
+                            this.bot.log(this.bot.isMobile, '登录', `[${email}] 尝试点击第 ${i+1} 个宽松匹配元素`);
+                            await element.scrollIntoViewIfNeeded();
+                            await element.click({ timeout: 5000 });
+                            clicked = true;
+                            this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功点击宽松匹配的"使用密码"选项`);
+                            break;
+                        }
+                    }
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 方法3失败: ${error instanceof Error ? error.message : String(error)}`, 'warn');
+                }
+            }
+            
+            // 如果所有方法都失败，尝试使用JavaScript点击
+            if (!clicked) {
+                try {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 尝试使用JavaScript点击"使用密码"选项`);
+                    
+                    // 使用JavaScript查找并点击元素
+                    const jsResult = await page.evaluate(() => {
+                        // 查找包含"使用密码"文本的元素
+                        const elements = Array.from(document.querySelectorAll('*')).filter(el => {
+                            const text = el.textContent || '';
+                            return text.includes('使用密码') || text.includes('Use your password') || text.includes('密码登录') || text.includes('Password login');
+                        });
+                        
+                        if (elements.length > 0) {
+                            // 尝试点击第一个可见的元素
+                            for (const el of elements) {
+                                const htmlEl = el as HTMLElement;
+                                if (htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0) {
+                                    htmlEl.click();
+                                    return { success: true, element: htmlEl.tagName, text: htmlEl.textContent };
+                                }
+                            }
+                        }
+                        return { success: false, reason: 'No visible elements found' };
+                    });
+                    
+                    if (jsResult.success) {
+                        clicked = true;
+                        this.bot.log(this.bot.isMobile, '登录', `[${email}] JavaScript点击成功: ${jsResult.element} - ${jsResult.text}`);
+                    } else {
+                        this.bot.log(this.bot.isMobile, '登录', `[${email}] JavaScript点击失败: ${jsResult.reason}`, 'warn');
+                    }
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] JavaScript点击异常: ${error instanceof Error ? error.message : String(error)}`, 'warn');
+                }
+            }
+            
+            if (clicked) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功点击"使用密码"选项，等待页面加载...`, 'log');
+                await this.bot.utils.wait(5000);
+                
+                // 验证是否成功跳转到密码输入页面
+                try {
+                    const passwordInput = await page.waitForSelector('input[type="password"]', { timeout: 10000 });
+                    if (passwordInput) {
+                        this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功跳转到密码输入页面`);
+                        return;
+                    }
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 等待密码输入框超时，可能页面跳转失败`, 'warn');
+                }
             } else {
-                const optionsCount = await usePasswordOptions.count();
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 未找到可见的'使用密码'相关选项，共找到 ${optionsCount} 个潜在匹配元素`, 'warn');
-            }
-            
-            // 2. 如果直接匹配失败，尝试使用包含文本的方式查找按钮和链接
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 尝试使用包含文本方式查找"使用密码"选项`, 'log');
-            
-            // 查找所有按钮
-            const allButtons = page.locator('button');
-            const buttonCount = await allButtons.count();
-            
-            for (let i = 0; i < buttonCount; i++) {
-                const button = allButtons.nth(i);
-                const text = await button.textContent();
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 所有方法都无法找到或点击"使用密码"选项`, 'error');
                 
-                if (text && (text.includes('密码') || text.toLowerCase().includes('password'))) {
-                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 找到可能的密码登录按钮: ${text}`, 'log');
-                    // 确保按钮可见
-                    await button.waitFor({ state: 'visible', timeout: 1000 });
-                    // 滚动到按钮
-                    await button.scrollIntoViewIfNeeded();
-                    await button.click();
-                    await this.bot.utils.wait(3000);
+                // 保存最终页面状态用于调试
+                const finalHtmlFilePath = path.join(this.bot.config.sessionPath, email, `verify_email_final_${Date.now()}.html`);
+                await fs.promises.writeFile(finalHtmlFilePath, await page.content());
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 最终验证页面HTML已保存到: ${finalHtmlFilePath}`, 'log');
+                
+                // 尝试继续流程，看看是否可以直接输入密码
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 尝试直接查找密码输入框...`);
+                const passwordInput = await page.waitForSelector('input[type="password"]', { timeout: 5000 }).catch(() => null);
+                if (passwordInput) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 找到密码输入框，继续登录流程`);
                     return;
                 }
             }
-            
-            // 查找所有链接
-            const allLinks = page.locator('a');
-            const linkCount = await allLinks.count();
-            
-            for (let i = 0; i < linkCount; i++) {
-                const link = allLinks.nth(i);
-                const text = await link.textContent();
-                
-                if (text && (text.includes('密码') || text.toLowerCase().includes('password'))) {
-                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 找到可能的密码登录链接: ${text}`, 'log');
-                    // 确保链接可见
-                    await link.waitFor({ state: 'visible', timeout: 1000 });
-                    // 滚动到链接
-                    await link.scrollIntoViewIfNeeded();
-                    await link.click();
-                    await this.bot.utils.wait(3000);
-                    return;
-                }
-            }
-            
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 未找到任何包含密码相关文本的选项`, 'warn');
         }
     }
 
@@ -465,7 +555,9 @@ export class Login {
         const invalidPassword = page.locator(':text("That password isn\'t correct"), :text("密码不正确")');
         if (await invalidPassword.isVisible({ timeout: 1000 })) {
             // 截图：密码错误页面
-            await this.saveSnapshot(page, email, `invalid_password_page_${Date.now()}.html`);
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `invalid_password_page_${Date.now()}.html`);
+            }
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到密码错误`);
             await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.PasswordError, '密码不正确');
             throw new Error(`[${email}] 密码不正确`);
@@ -475,7 +567,9 @@ export class Login {
         const securityVerificationTitle = page.locator('h1:has-text("安全验证"), h1:has-text("Security Verification")');
         if (await securityVerificationTitle.isVisible({ timeout: 1000 })) {
             // 截图：安全验证页面
-            await this.saveSnapshot(page, email, `security_verification_page_${Date.now()}.html`);
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `security_verification_page_${Date.now()}.html`);
+            }
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到“安全验证”页面`);
             await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.VerificationRequired, '需要安全验证');
             
@@ -491,7 +585,9 @@ export class Login {
         const accountRecoveryTitle = page.locator('h1:has-text("恢复你的账户"), h1:has-text("Recover your account")');
         if (await accountRecoveryTitle.isVisible({ timeout: 1000 })) {
             // 截图：账户恢复页面
-            await this.saveSnapshot(page, email, `account_recovery_page_${Date.now()}.html`);
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `account_recovery_page_${Date.now()}.html`);
+            }
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到“账户恢复”页面`);
             await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.Locked, '账户需要恢复');
         }
@@ -500,7 +596,9 @@ export class Login {
         const captchaInput = page.locator('input[id*="captcha"], input[aria-label*="验证码"]');
         if (await captchaInput.isVisible({ timeout: 1000 })) {
             // 截图：验证码页面
-            await this.saveSnapshot(page, email, `captcha_page_${Date.now()}.html`);
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `captcha_page_${Date.now()}.html`);
+            }
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到验证码页面`);
             await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.VerificationRequired, '需要输入验证码');
             
@@ -517,7 +615,7 @@ export class Login {
         this.bot.log(this.bot.isMobile, '调试模式', `[${email}] 正在保存页面快照...`, 'warn');
         try {
             await this.bot.utils.wait(2000);
-            const sessionDir = path.join(__dirname, '..', '..', this.bot.config.sessionPath, email);
+            const sessionDir = path.join(process.cwd(), this.bot.config.sessionPath, email);
             if (!fs.existsSync(sessionDir)) {
                 fs.mkdirSync(sessionDir, { recursive: true });
             }

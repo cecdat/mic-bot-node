@@ -30,6 +30,11 @@ export interface ConfigWebhook {
     url: string;
 }
 
+export interface ConfigSnapshots {
+    // 登录流程相关快照（HTML/PNG）
+    login: boolean;
+}
+
 export interface ConfigNtfy {
     enabled: boolean;
     url: string;
@@ -62,6 +67,8 @@ export interface Config {
     sessionPath: string;
     headless: boolean;
     parallel: boolean;
+    // 并发账号数（从 service 端节点配置下发）
+    clusters?: number;
     runOnZeroPoints: boolean;
     debug: boolean;
     saveFingerprint: ConfigSaveFingerprint;
@@ -77,4 +84,5 @@ export interface Config {
     ntfy: ConfigNtfy;
     apiServer: ConfigApiServer;
     hotSearchApi: ConfigHotSearchApi;
+    snapshots?: ConfigSnapshots;
 }

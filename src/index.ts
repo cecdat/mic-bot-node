@@ -1,4 +1,4 @@
-import { exec, ExecException } from 'child_process';
+import { exec, ExecException, fork, ChildProcess } from 'child_process';
 import * as playwright from 'playwright';
 import fs from 'fs';
 import path from 'path';
@@ -18,7 +18,6 @@ import { Account } from './interface/Account';
 import Axios from './util/Axios';
 import axios from 'axios';
 import { Config } from './interface/Config'; 
-import express, { Request, Response } from 'express';
 
 // 添加全局变量跟踪任务运行状态
 let isTaskRunning = false;
@@ -229,7 +228,7 @@ export class MicrosoftRewardsBot {
         this.sendStatusUpdate = (type, status, code, message) => sendLoginStatusUpdate(this, type, status, code, message);
     }
     
-    private async Desktop(browser: PlaywrightBrowser, account: Account): Promise<{points: number, gain: number}> {
+    private async Desktop(browser: PlaywrightBrowser, account: Account, initialPointsToday: number): Promise<{points: number, gain: number}> {
         this.isMobile = false;
         const context = await this.browserFactory.createContext(browser, account);
         const page = await context.newPage();
@@ -237,14 +236,27 @@ export class MicrosoftRewardsBot {
             log(this.isMobile, '主流程', `[${account.email}] 已创建桌面端上下文`);
             await this.login.login(page, account.email, account.password);
             
+            // 登录成功后获取初始积分
+            const initialData = await this.browser.func.getDashboardData(page);
+            const currentInitialPoints = initialData.userStatus.availablePoints;
+            
+            // 如果之前没有初始积分记录，则保存当前积分作为初始值
+            if (initialPointsToday === 0) {
+                const todayStr = this.utils.getYYYYMMDD();
+                await saveDailyPoints(this.config.sessionPath, account.email, { 
+                    date: todayStr, 
+                    initialPoints: currentInitialPoints 
+                });
+                initialPointsToday = currentInitialPoints;
+                log(false, '主流程', `[${account.email}] 已保存桌面端初始积分: ${initialPointsToday}`);
+            }
+            
             // 检查是否需要停止
             if (this.checkStopStatus()) {
                 log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
-                return { points: 0, gain: 0 };
+                return { points: initialPointsToday, gain: 0 };
             }
             
-            const initialData = await this.browser.func.getDashboardData(page);
-            const initialPoints = initialData.userStatus.availablePoints;
             const allTasks = aiOrchestrator.getAllIncompleteTasks(initialData);
             if (allTasks.length > 0) {
                 const executionPlan = await aiOrchestrator.getTaskExecutionPlan(allTasks);
@@ -252,7 +264,7 @@ export class MicrosoftRewardsBot {
                     // 检查是否需要停止
                     if (this.checkStopStatus()) {
                         log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
-                        return { points: initialPoints, gain: 0 };
+                        return { points: initialPointsToday, gain: 0 };
                     }
                     await this.workers.executeSingleTask(page, task);
                 }
@@ -262,13 +274,13 @@ export class MicrosoftRewardsBot {
             if (this.config.workers.doDesktopSearch) await this.activities.doSearch(page, afterActivitiesData, account.email);
             const finalData = await this.browser.func.getDashboardData(page);
             const finalPoints = finalData.userStatus.availablePoints;
-            return { points: finalPoints, gain: finalPoints - initialPoints };
+            return { points: finalPoints, gain: finalPoints - initialPointsToday };
         } finally {
             await context.close();
         }
     }
 
-    private async Mobile(browser: PlaywrightBrowser, account: Account): Promise<{points: number, gain: number}> {
+    private async Mobile(browser: PlaywrightBrowser, account: Account, initialPointsToday: number): Promise<{points: number, gain: number}> {
         this.isMobile = true;
         const context = await this.browserFactory.createContext(browser, account);
         const page = await context.newPage();
@@ -276,14 +288,13 @@ export class MicrosoftRewardsBot {
             log(this.isMobile, '主流程', `[${account.email}] 已创建移动端上下文`);
             await this.login.login(page, account.email, account.password);
             const initialData = await this.browser.func.getDashboardData(page);
-            const initialPoints = initialData.userStatus.availablePoints;
             const tokenPage = await context.newPage();
             try { this.accessToken = await this.login.getMobileAccessToken(tokenPage, account.email); }
             finally { await tokenPage.close(); }
             // 检查是否需要停止
             if (this.checkStopStatus()) {
                 log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
-                return { points: initialPoints, gain: 0 };
+                return { points: initialPointsToday, gain: 0 };
             }
 
             if (this.config.workers.doDailyCheckIn) await this.activities.doDailyCheckIn(this.accessToken, initialData);
@@ -291,7 +302,7 @@ export class MicrosoftRewardsBot {
             // 检查是否需要停止
             if (this.checkStopStatus()) {
                 log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
-                return { points: initialPoints, gain: 0 };
+                return { points: initialPointsToday, gain: 0 };
             }
 
             if (this.config.workers.doReadToEarn) await this.activities.doReadToEarn(this.accessToken, initialData);
@@ -299,7 +310,7 @@ export class MicrosoftRewardsBot {
             // 检查是否需要停止
             if (this.checkStopStatus()) {
                 log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
-                return { points: initialPoints, gain: 0 };
+                return { points: initialPointsToday, gain: 0 };
             }
 
             if (this.config.workers.doMobileSearch) {
@@ -309,7 +320,7 @@ export class MicrosoftRewardsBot {
             }
             const finalData = await this.browser.func.getDashboardData(page);
             const finalPoints = finalData.userStatus.availablePoints;
-            return { points: finalPoints, gain: finalPoints - initialPoints };
+            return { points: finalPoints, gain: finalPoints - initialPointsToday };
         } finally {
             await context.close();
         }
@@ -323,52 +334,61 @@ export class MicrosoftRewardsBot {
             const todayStr = this.utils.getYYYYMMDD();
             const dailyPointsData = await loadDailyPoints(this.config.sessionPath, account.email);
             let initialPointsToday = 0;
+            
+            // 检查是否有今日的初始积分记录
             if (dailyPointsData && dailyPointsData.date === todayStr) {
-     initialPointsToday = dailyPointsData.initialPoints;
-}
+                initialPointsToday = dailyPointsData.initialPoints;
+                log(false, '主流程', `[${account.email}] 使用已保存的今日初始积分: ${initialPointsToday}`);
+            }
+            
             // 添加停止检查
             if (shouldStopTask) {
                 log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
                 return;
             }
-            const recoveryContext = await this.browserFactory.createContext(browser, account);
-            const recoveryPage = await recoveryContext.newPage();
-            try {
-                // 关键改动：增加了 try/catch 来包裹获取数据的逻辑
-                const data = await this.browser.func.getDashboardData(recoveryPage);
-                initialPointsToday = data.userStatus.availablePoints;
-                await saveDailyPoints(this.config.sessionPath, account.email, { date: todayStr, initialPoints: initialPointsToday });
-            } catch (e: any) {
-                // 如果获取失败，记录警告并默认初始积分为0
-                log(false, '主流程', `无法在任务开始前获取初始积分: ${e.message}。将让主流程处理登录。`, 'warn');
-                initialPointsToday = 0; 
-            }
-            finally {
-                await recoveryContext.close();
-            }
+            
+            // 先执行桌面端任务，在登录成功后获取初始积分
+            const desktopResult = await this.Desktop(browser, account, initialPointsToday).catch(e => { 
+                log(false, 'Desktop-Error', e.message, 'error'); 
+                return {points: 0, gain: 0}
+            });
+            
             // 添加停止检查
             if (shouldStopTask) {
                 log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
                 return;
             }
-            const desktopResult = await this.Desktop(browser, account).catch(e => { log(false, 'Desktop-Error', e.message, 'error'); return {points: 0, gain: 0}});
+            
+            // 执行移动端任务
+            const mobileResult = await this.Mobile(browser, account, initialPointsToday).catch(e => { 
+                log(true, 'Mobile-Error', e.message, 'error'); 
+                return {points: 0, gain: 0}
+            });
+            
             // 添加停止检查
             if (shouldStopTask) {
                 log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
                 return;
             }
-            const mobileResult = await this.Mobile(browser, account).catch(e => { log(true, 'Mobile-Error', e.message, 'error'); return {points: 0, gain: 0}});
-            // 添加停止检查
-            if (shouldStopTask) {
-                log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
-                return;
+            
+            // 获取最终积分
+            const finalPoints = await this.browser.func.getDashboardData(await browser.newPage())
+                .then(d => d.userStatus.availablePoints)
+                .catch(() => desktopResult.points > 0 ? desktopResult.points : 0);
+
+            // 计算今日总收益（如果初始积分为0，则跳过收益计算）
+            const dailyGain = initialPointsToday > 0 ? finalPoints - initialPointsToday : 0;
+            
+            if (initialPointsToday === 0) {
+                log(false, '主流程', `[${account.email}] 初始积分获取失败，跳过今日收益计算`);
+            } else {
+                log(false, '主流程', `[${account.email}] 积分统计 - 初始: ${initialPointsToday}, 最终: ${finalPoints}, 今日收益: ${dailyGain}`);
             }
-            const finalPoints = await this.browser.func.getDashboardData(await browser.newPage()).then(d => d.userStatus.availablePoints).catch(() => desktopResult.points > 0 ? desktopResult.points : 0);
 
             await sendFinalUpdate(this, {
                 email: account.email,
                 total_points: finalPoints,
-                daily_gain: finalPoints - initialPointsToday,
+                daily_gain: dailyGain,
                 desktop_gain: desktopResult.gain,
                 mobile_gain: mobileResult.gain
             });
@@ -380,103 +400,45 @@ export class MicrosoftRewardsBot {
 
 
 async function runTasksForAccounts(accounts: Account[], config: Config) {
-    for (const account of accounts) {
-        if (shouldStopTask) {
-            log('main', '主进程-WORKER', '收到停止指令，终止任务执行...', 'warn');
-            await updateActivityStatus('Idle');
-            return;
-        }
+    // 并发数：优先使用 service 下发的 clusters，其次使用本地 parallel（true 视为 2），默认 1
+    const concurrency = Math.max(1, Number((config as any).clusters || (config.parallel ? 2 : 1)) || 1);
+    log('main', '主进程-WORKER', `使用并发数: ${concurrency}`);
 
-        if (accountStatusManager.isFrozen(account.email)) {
-            continue;
-        }
+    const queue: Account[] = accounts.filter(a => !accountStatusManager.isFrozen(a.email));
+    const children: ChildProcess[] = [];
 
-        log('main', '主进程-WORKER', `开始为账户 ${account.email} 执行任务`);
-        const bot = new MicrosoftRewardsBot();
-
-        // 关键：将合并后的最终配置赋值给 bot 实例
-        bot.config = config; 
-
-        try {
-            // 添加任务执行前的停止检查
+    async function spawnWorker(workerId: number) {
+        while (queue.length > 0) {
             if (shouldStopTask) {
-                log('main', '主进程-WORKER', '任务执行前检测到停止指令，终止任务...', 'warn');
-                await updateActivityStatus('Idle');
+                log('main', '主进程-WORKER', `并发#${workerId} 收到停止指令，结束`, 'warn');
                 return;
             }
-            
-            // 确保停止检查函数已正确设置（冗余检查，防止意外）
-        if (bot.checkStopStatus() !== shouldStopTask) {
-            log('main', '主进程-WORKER', '修正停止检查函数设置', 'warn');
-            bot.checkStopStatus = () => shouldStopTask;
+            const account = queue.shift();
+            if (!account) break;
+
+            log('main', '主进程-WORKER', `开始为账户 ${account.email} 执行任务 (并发#${workerId})`);
+            const env = { ...process.env, ACCOUNT: JSON.stringify(account) } as any;
+            const cp = fork('./dist/worker.js', { env, stdio: 'inherit' });
+            children.push(cp);
+            await new Promise<void>((resolve) => {
+                cp.on('exit', () => resolve());
+            });
         }
-            await bot.runFor(account);
-            accountStatusManager.recordSuccess(account.email);
-        } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            log('main', '主进程-WORKER', `账户 ${account.email} 的任务执行失败: ${errorMessage}`, 'error');
-            accountStatusManager.recordFailure(account.email);
-            await sendFinalUpdate(bot, {email: account.email, total_points: -1, daily_gain: -1, desktop_gain: 0, mobile_gain: 0});
-        }
-        log('main', '主进程-WORKER', `完成账户 ${account.email} 的所有任务流程。`, 'log', 'green');
+    }
+
+    // 启动固定数量的子进程消费队列（串行复用 child，避免爆炸性进程增长）
+    await Promise.all(Array.from({ length: concurrency }, (_, i) => spawnWorker(i + 1)));
+
+    // 清理残留子进程
+    for (const cp of children) {
+        try { cp.kill(); } catch {}
     }
 }
 
 async function main() {
     log('main', '主流程', `Mic-Bot 执行节点已启动...`);
 
-    // 添加临时HTTP服务器用于测试停止命令
-    const app = express();
-    app.use(express.json());
-    // POST端点保持不变，添加GET端点用于简单测试
-    app.post('/test/stop', (req: Request, res: Response) => {
-        log('main', '测试端点', '收到手动停止命令', 'warn');
-        shouldStopTask = true;
-        updateActivityStatus('Idle');
-        res.json({ success: true, message: '已触发停止命令' });
-    });
-
-    // 处理服务端发送的停止指令
-    app.post('/web_api/nodes/1/stop', (req: Request, res: Response) => {
-        log('main', '节点管理', '收到服务端停止命令', 'warn');
-        shouldStopTask = true;
-        updateActivityStatus('Idle');
-        res.json({ success: true, message: '已触发停止命令' });
-    });
-    // 添加GET端点，便于测试
-    app.get('/test/stop', (req: Request, res: Response) => {
-        log('main', '测试端点', '收到GET手动停止命令', 'warn');
-        shouldStopTask = true;
-        updateActivityStatus('Idle');
-        res.json({ success: true, message: '已触发停止命令' });
-    });
-
-    // 添加测试端点，用于触发任务执行
-    app.get('/test/run_tasks', (req: Request, res: Response) => {
-        log('main', '测试端点', '收到触发任务命令', 'warn');
-        log('main', '测试端点', `请求路径: ${req.path}`, 'log');
-        log('main', '测试端点', `请求方法: ${req.method}`, 'log');
-        if (!isTaskRunning) {
-            log('main', '测试端点', '开始执行任务...', 'log');
-            executeTasks().catch(err => {
-                log('main', '任务执行', `任务执行出错: ${String(err)}`, 'error');
-            });
-            res.json({ success: true, message: '已触发任务执行' });
-        } else {
-            log('main', '测试端点', '任务已经在运行中', 'warn');
-            res.json({ success: false, message: '任务已经在运行中' });
-        }
-    });
-
-    // 添加一个根端点，用于测试连接
-    app.get('/', (req: Request, res: Response) => {
-        log('main', '测试端点', '收到根路径请求', 'log');
-        res.json({ success: true, message: '节点服务正常运行' });
-    });
-    // 直接启动服务器，不声明未使用的变量
-    app.listen(3002, () => {
-        log('main', '测试端点', '临时HTTP服务器已启动在端口 3002', 'log');
-    });
+    // 移除临时HTTP测试端口与相关路由
     // 步骤 1: 加载本地基础配置，确保 config 是变量 (let)
     let config = loadConfig();
     const utils = new Util();
@@ -500,12 +462,15 @@ async function main() {
             };
 
             // 将重组后的配置与本地配置合并，远程的 searchSettings 会覆盖本地的
+            // 同时合入 service 端下发的并发数 clusters
             config = {
                 ...config,
-                searchSettings: remoteSearchSettings
+                searchSettings: remoteSearchSettings,
+                clusters: (nodeConfig as any).clusters
             };
 
             log('main', '主流程', '已成功合并远程节点配置。');
+            log('main', '主流程', `服务端并发配置 clusters=${(nodeConfig as any).clusters}, 合并后 config.clusters=${(config as any).clusters}`);
         }
     } catch (error) {
         log('main', '主流程', '加载远程节点配置失败，将仅使用本地配置。', 'warn');

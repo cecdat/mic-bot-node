@@ -5,6 +5,9 @@
     "parallel": false,
     "runOnZeroPoints": false,
     "debug": true,
+    "snapshots": {
+        "login": true
+    },
     "saveFingerprint": {
         "mobile": false,
         "desktop": false
@@ -23,10 +26,10 @@
     "navigationTimeout": "120s",
     "apiServer": {
         "enabled": true,
-        "updateUrl": "http://10.52.175.75:5001/",
+        "updateUrl": "http://10.52.175.75:5000/",
         "token":"bb5b5c6b5989477f21296bdcbb57c8f84269a718a350e525",
         "nodeName": "test",
-        "heartbeatInterval": "5m",
+        "heartbeatInterval": "2m",
         "heartbeatTimeout": "10m"
     },
     "hotSearchApi": {

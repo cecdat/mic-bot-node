@@ -39,6 +39,9 @@ export class Search extends Workers {
         let currentQueries = [...searchQueries];
 
         while (missingPoints > 0 && currentQueries.length > 0 && maxLoop <= 10) {
+            // [新增] 每次搜索前清理多余标签页，避免资源占用
+            await this.closeExtraPages(page);
+            
             const query = currentQueries.shift()!;
             this.bot.log(this.bot.isMobile, '搜索-必应', `剩余 ${missingPoints} 积分 | 查询: ${query}`);
 
@@ -150,32 +153,131 @@ export class Search extends Workers {
 
     private async randomScroll(page: Page) {
         try {
-            const viewportHeight = await page.evaluate(() => window.innerHeight)
-            const totalHeight = await page.evaluate(() => document.body.scrollHeight)
-            const randomScrollPosition = Math.floor(Math.random() * (totalHeight - viewportHeight))
-            await page.evaluate((scrollPos) => {
-                window.scrollTo(0, scrollPos)
-            }, randomScrollPosition)
+            // 添加更安全的DOM元素检查
+            const viewportHeight = await page.evaluate(() => {
+                // 检查页面是否完全加载
+                if (!document.body || !document.documentElement) {
+                    return 0;
+                }
+                return window.innerHeight || 0;
+            });
+            
+            const totalHeight = await page.evaluate(() => {
+                // 检查页面是否完全加载，并提供备用方案
+                if (!document.body || !document.documentElement) {
+                    return 0;
+                }
+                // 优先使用documentElement.scrollHeight，如果失败则使用body.scrollHeight
+                return document.documentElement.scrollHeight || document.body.scrollHeight || 0;
+            });
+            
+            // 只有在有效高度时才进行滚动
+            if (viewportHeight > 0 && totalHeight > viewportHeight) {
+                const randomScrollPosition = Math.floor(Math.random() * (totalHeight - viewportHeight));
+                await page.evaluate((scrollPos: number) => {
+                    if (window && typeof (window as any).scrollTo === 'function') {
+                        (window as any).scrollTo(0, scrollPos);
+                    }
+                }, randomScrollPosition);
+                
+                this.bot.log(this.bot.isMobile, '搜索-随机滚动', `成功滚动到位置: ${randomScrollPosition}/${totalHeight}`);
+            } else {
+                this.bot.log(this.bot.isMobile, '搜索-随机滚动', `页面高度不足，跳过滚动 (viewport: ${viewportHeight}, total: ${totalHeight})`);
+            }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            this.bot.log(this.bot.isMobile, '搜索-随机滚动', `发生错误: ${errorMessage}`, 'error')
+            this.bot.log(this.bot.isMobile, '搜索-随机滚动', `发生错误: ${errorMessage}`, 'error');
         }
     }
 
     private async clickRandomLink(page: Page) {
         try {
+            // 添加更安全的元素检查
             const resultsContainer = page.locator('#b_results');
+            
+            // 检查结果容器是否存在
+            const isVisible = await resultsContainer.isVisible({ timeout: 3000 }).catch(() => false);
+            if (!isVisible) {
+                this.bot.log(this.bot.isMobile, '搜索-随机点击', '搜索结果容器不可见，跳过点击');
+                return;
+            }
+            
             const links = resultsContainer.getByRole('link');
             const count = await links.count();
+            
             if (count > 0) {
                 const clickMaxIndex = Math.min(count, 5);
                 const randomIndex = Math.floor(Math.random() * clickMaxIndex);
-                await links.nth(randomIndex).click({ timeout: 5000 }).catch(() => {});
+                
+                // [新增] 捕获可能的新开标签页
+                const popupPromise = page.waitForEvent('popup', { timeout: 5000 }).catch(() => null);
+                let popupOpened = null as null | Page;
+                
+                // 使用 JS 触发点击，避免 Playwright 为导航自动等待
+                const beforeUrl = page.url();
+                try {
+                    const handle = await links.nth(randomIndex).elementHandle({ timeout: 3000 });
+                    if (handle) {
+                        await page.evaluate((el) => {
+                            (el as HTMLElement).click();
+                        }, handle);
+                    } else {
+                        throw new Error('未获取到可点击的链接句柄');
+                    }
+                    popupOpened = await popupPromise;
+                } catch (clickError) {
+                    this.bot.log(this.bot.isMobile, '搜索-随机点击', `点击链接失败: ${clickError}`, 'warn');
+                }
+                
+                // 如果没有弹窗，等待短暂的同页导航或 URL 变化
+                if (!popupOpened) {
+                    await Promise.race([
+                        page.waitForNavigation({ timeout: 4000 }).catch(() => null),
+                        page.waitForURL(u => u.toString() !== beforeUrl, { timeout: 4000 }).catch(() => null)
+                    ]);
+                }
+                
+                if (popupOpened) {
+                    await popupOpened.waitForLoadState('domcontentloaded').catch(() => {});
+                    await this.bot.utils.wait(2000);
+                    const popupUrl = popupOpened.url();
+                    this.bot.log(this.bot.isMobile, '搜索-随机点击', `检测到新标签页: ${popupUrl}，将关闭以节省资源`);
+                    await popupOpened.close().catch(() => {});
+                    return;
+                }
+                
+                // 若当前页发生了同页跳转，则尝试回退
+                await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+                const currentUrl = page.url();
+                if (!/bing\.com\/search/i.test(currentUrl)) {
+                    this.bot.log(this.bot.isMobile, '搜索-随机点击', `检测到同页跳转至非搜索页: ${currentUrl}，将回退到搜索结果`);
+                    await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
+                }
+            } else {
+                this.bot.log(this.bot.isMobile, '搜索-随机点击', '未找到可点击的链接');
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            this.bot.log(this.bot.isMobile, '搜索-随机点击', `发生错误: ${errorMessage}`, 'error')
+            this.bot.log(this.bot.isMobile, '搜索-随机点击', `发生错误: ${errorMessage}`, 'error');
         }
+    }
+
+    // [新增] 关闭除第一个以外的所有页面，避免资源占用
+    private async closeExtraPages(page: Page) {
+        try {
+            const context = page.context();
+            const pages = context.pages();
+            if (pages.length <= 1) return;
+            for (let i = 1; i < pages.length; i++) {
+                try {
+                    const pageToClose = pages[i];
+                    if (pageToClose) {
+                        await (pageToClose as any).close({ runBeforeUnload: true });
+                    }
+                } catch {}
+            }
+            this.bot.log(this.bot.isMobile, '搜索-资源清理', `已关闭多余标签页，剩余 ${context.pages().length} 个页面`);
+        } catch {}
     }
 
     private calculatePoints(counters: Counters) {
