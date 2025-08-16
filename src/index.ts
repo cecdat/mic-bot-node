@@ -228,7 +228,7 @@ export class MicrosoftRewardsBot {
         this.sendStatusUpdate = (type, status, code, message) => sendLoginStatusUpdate(this, type, status, code, message);
     }
     
-    private async Desktop(browser: PlaywrightBrowser, account: Account, initialPointsToday: number): Promise<{points: number, gain: number}> {
+    private async Desktop(browser: PlaywrightBrowser, account: Account, initialPointsToday: number): Promise<{points: number, gain: number, initialPoints: number}> {
         this.isMobile = false;
         const context = await this.browserFactory.createContext(browser, account);
         const page = await context.newPage();
@@ -254,7 +254,7 @@ export class MicrosoftRewardsBot {
             // 检查是否需要停止
             if (this.checkStopStatus()) {
                 log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
-                return { points: initialPointsToday, gain: 0 };
+                return { points: initialPointsToday, gain: 0, initialPoints: initialPointsToday };
             }
             
             const allTasks = aiOrchestrator.getAllIncompleteTasks(initialData);
@@ -264,7 +264,7 @@ export class MicrosoftRewardsBot {
                     // 检查是否需要停止
                     if (this.checkStopStatus()) {
                         log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
-                        return { points: initialPointsToday, gain: 0 };
+                        return { points: initialPointsToday, gain: 0, initialPoints: initialPointsToday };
                     }
                     await this.workers.executeSingleTask(page, task);
                 }
@@ -274,13 +274,19 @@ export class MicrosoftRewardsBot {
             if (this.config.workers.doDesktopSearch) await this.activities.doSearch(page, afterActivitiesData, account.email);
             const finalData = await this.browser.func.getDashboardData(page);
             const finalPoints = finalData.userStatus.availablePoints;
-            return { points: finalPoints, gain: finalPoints - initialPointsToday };
+            
+            // 计算桌面端收益：使用今日初始积分作为基准
+            const desktopGain = finalPoints - initialPointsToday;
+            
+            log(false, '主流程', `[${account.email}] 桌面端任务完成 - 初始积分: ${initialPointsToday}, 最终积分: ${finalPoints}, 收益: ${desktopGain}`);
+            
+            return { points: finalPoints, gain: desktopGain, initialPoints: initialPointsToday };
         } finally {
             await context.close();
         }
     }
 
-    private async Mobile(browser: PlaywrightBrowser, account: Account, initialPointsToday: number): Promise<{points: number, gain: number}> {
+    private async Mobile(browser: PlaywrightBrowser, account: Account, desktopFinalPoints: number): Promise<{points: number, gain: number, initialPoints: number}> {
         this.isMobile = true;
         const context = await this.browserFactory.createContext(browser, account);
         const page = await context.newPage();
@@ -288,13 +294,18 @@ export class MicrosoftRewardsBot {
             log(this.isMobile, '主流程', `[${account.email}] 已创建移动端上下文`);
             await this.login.login(page, account.email, account.password);
             const initialData = await this.browser.func.getDashboardData(page);
+            
+            // 移动端使用桌面端完成后的积分作为初始值
+            const mobileInitialPoints = desktopFinalPoints;
+            
             const tokenPage = await context.newPage();
             try { this.accessToken = await this.login.getMobileAccessToken(tokenPage, account.email); }
             finally { await tokenPage.close(); }
+            
             // 检查是否需要停止
             if (this.checkStopStatus()) {
                 log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
-                return { points: initialPointsToday, gain: 0 };
+                return { points: mobileInitialPoints, gain: 0, initialPoints: mobileInitialPoints };
             }
 
             if (this.config.workers.doDailyCheckIn) await this.activities.doDailyCheckIn(this.accessToken, initialData);
@@ -302,7 +313,7 @@ export class MicrosoftRewardsBot {
             // 检查是否需要停止
             if (this.checkStopStatus()) {
                 log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
-                return { points: initialPointsToday, gain: 0 };
+                return { points: mobileInitialPoints, gain: 0, initialPoints: mobileInitialPoints };
             }
 
             if (this.config.workers.doReadToEarn) await this.activities.doReadToEarn(this.accessToken, initialData);
@@ -310,7 +321,7 @@ export class MicrosoftRewardsBot {
             // 检查是否需要停止
             if (this.checkStopStatus()) {
                 log(this.isMobile, '主流程', `[${account.email}] 检测到停止指令，终止任务...`, 'warn');
-                return { points: initialPointsToday, gain: 0 };
+                return { points: mobileInitialPoints, gain: 0, initialPoints: mobileInitialPoints };
             }
 
             if (this.config.workers.doMobileSearch) {
@@ -318,9 +329,16 @@ export class MicrosoftRewardsBot {
                     await this.activities.doSearch(page, initialData, account.email);
                 }
             }
+            
             const finalData = await this.browser.func.getDashboardData(page);
             const finalPoints = finalData.userStatus.availablePoints;
-            return { points: finalPoints, gain: finalPoints - initialPointsToday };
+            
+            // 计算移动端收益：使用桌面端完成后的积分作为基准
+            const mobileGain = finalPoints - mobileInitialPoints;
+            
+            log(true, '主流程', `[${account.email}] 移动端任务完成 - 初始积分: ${mobileInitialPoints}, 最终积分: ${finalPoints}, 收益: ${mobileGain}`);
+            
+            return { points: finalPoints, gain: mobileGain, initialPoints: mobileInitialPoints };
         } finally {
             await context.close();
         }
@@ -350,7 +368,7 @@ export class MicrosoftRewardsBot {
             // 先执行桌面端任务，在登录成功后获取初始积分
             const desktopResult = await this.Desktop(browser, account, initialPointsToday).catch(e => { 
                 log(false, 'Desktop-Error', e.message, 'error'); 
-                return {points: 0, gain: 0}
+                return {points: 0, gain: 0, initialPoints: 0}
             });
             
             // 添加停止检查
@@ -359,10 +377,10 @@ export class MicrosoftRewardsBot {
                 return;
             }
             
-            // 执行移动端任务
-            const mobileResult = await this.Mobile(browser, account, initialPointsToday).catch(e => { 
+            // 执行移动端任务，使用桌面端完成后的积分作为移动端初始积分
+            const mobileResult = await this.Mobile(browser, account, desktopResult.points).catch(e => { 
                 log(true, 'Mobile-Error', e.message, 'error'); 
-                return {points: 0, gain: 0}
+                return {points: 0, gain: 0, initialPoints: 0}
             });
             
             // 添加停止检查
@@ -371,26 +389,29 @@ export class MicrosoftRewardsBot {
                 return;
             }
             
-            // 获取最终积分
-            const finalPoints = await this.browser.func.getDashboardData(await browser.newPage())
-                .then(d => d.userStatus.availablePoints)
-                .catch(() => desktopResult.points > 0 ? desktopResult.points : 0);
+            // 获取最终积分：使用移动端完成后的积分作为最终积分
+            const finalPoints = mobileResult.points > 0 ? mobileResult.points : desktopResult.points;
 
-            // 计算今日总收益（如果初始积分为0，则跳过收益计算）
+            // 计算今日总收益：使用今日初始积分作为基准
             const dailyGain = initialPointsToday > 0 ? finalPoints - initialPointsToday : 0;
+            
+            // 计算桌面端和移动端的实际收益
+            const actualDesktopGain = desktopResult.gain;
+            const actualMobileGain = mobileResult.gain;
             
             if (initialPointsToday === 0) {
                 log(false, '主流程', `[${account.email}] 初始积分获取失败，跳过今日收益计算`);
             } else {
                 log(false, '主流程', `[${account.email}] 积分统计 - 初始: ${initialPointsToday}, 最终: ${finalPoints}, 今日收益: ${dailyGain}`);
+                log(false, '主流程', `[${account.email}] 桌面端收益: ${actualDesktopGain}, 移动端收益: ${actualMobileGain}`);
             }
 
             await sendFinalUpdate(this, {
                 email: account.email,
                 total_points: finalPoints,
                 daily_gain: dailyGain,
-                desktop_gain: desktopResult.gain,
-                mobile_gain: mobileResult.gain
+                desktop_gain: actualDesktopGain,
+                mobile_gain: actualMobileGain
             });
         } finally {
             await browser.close();

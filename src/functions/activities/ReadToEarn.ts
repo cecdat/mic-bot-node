@@ -8,11 +8,14 @@ import { DashboardData } from '../../interface/DashboardData'
 
 export class ReadToEarn extends Workers {
     public async doReadToEarn(accessToken: string, data: DashboardData) {
-        this.bot.log(this.bot.isMobile, '阅读文章', '开始执行“阅读文章”任务')
+        this.bot.log(this.bot.isMobile, '阅读文章', '开始执行"阅读文章"任务')
 
         try {
             let geoLocale = data.userProfile.attributes.country
-            geoLocale = (this.bot.config.searchSettings.useGeoLocaleQueries && geoLocale.length === 2) ? geoLocale.toLowerCase() : 'us'
+            
+            // 增加安全检查，确保searchSettings存在
+            const useGeoLocaleQueries = this.bot.config.searchSettings?.useGeoLocaleQueries ?? true;
+            geoLocale = (useGeoLocaleQueries && geoLocale.length === 2) ? geoLocale.toLowerCase() : 'us'
 
             const userDataRequest: AxiosRequestConfig = {
                 url: 'https://prod.rewardsplatform.microsoft.com/dapi/me',
@@ -62,11 +65,21 @@ export class ReadToEarn extends Workers {
                     // [核心修改] 将日志内容中文化
                     this.bot.log(this.bot.isMobile, '阅读文章', `阅读文章 ${i + 1} / ${articleCount} | 获得 ${newBalance - userBalance} 积分`)
                     userBalance = newBalance
-                    await this.bot.utils.wait(Math.floor(this.bot.utils.randomNumber(this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.min), this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.max))))
+                    
+                    // 增加安全检查，确保searchDelay存在
+                    const searchDelay = this.bot.config.searchSettings?.searchDelay;
+                    if (searchDelay) {
+                        const minDelay = this.bot.utils.stringToMs(searchDelay.min);
+                        const maxDelay = this.bot.utils.stringToMs(searchDelay.max);
+                        await this.bot.utils.wait(Math.floor(this.bot.utils.randomNumber(minDelay, maxDelay)));
+                    } else {
+                        // 使用默认延迟
+                        await this.bot.utils.wait(Math.floor(this.bot.utils.randomNumber(30000, 120000))); // 30秒到2分钟
+                    }
                 }
             }
 
-            this.bot.log(this.bot.isMobile, '阅读文章', '已完成“阅读文章”任务')
+            this.bot.log(this.bot.isMobile, '阅读文章', '已完成"阅读文章"任务')
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.bot.log(this.bot.isMobile, '阅读文章', `发生错误: ${errorMessage}`, 'error')
