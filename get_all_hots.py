@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 import time
 import argparse
+import requests
 
 # [核心修正] 移除所有硬编码的路径
 # SEARCH_TERMS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'search_terms')

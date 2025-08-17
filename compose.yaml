@@ -7,9 +7,7 @@ services:
       # Mount only the config file and the sessions directory
       - ./src/config.json:/app/dist/config.json:ro
       - ./sessions:/app/sessions
-    ports:
-      # 映射测试端点端口
-      - "3001:3001"
+
     environment:
       # Only timezone and Node environment are needed now
       TZ: "Asia/Shanghai"
