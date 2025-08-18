@@ -92,22 +92,90 @@ export class Login {
             if (passwordInputDirect) {
                 this.bot.log(this.bot.isMobile, '登录', '检测到密码输入框，跳过"使用密码"步骤');
             } else {
-                // [最终修复方案 - 基于HTML快照分析]
+                // [修复方案 - 支持中英文"使用密码"按钮]
                 this.bot.log(this.bot.isMobile, '登录', '正在检查"使用密码"登录选项...');
                 
-                // 根据快照，按钮的文本是英文的 "Use your password"
-                const usePasswordButton = page.getByRole('button', { name: 'Use your password', exact: true });
+                // 尝试多种方式查找"使用密码"按钮
+                let clicked = false;
                 
+                // 方法1：使用role="button"选择器（支持中英文）
                 try {
-                    // 等待按钮出现，如果7秒内没出现则认为不需要此步骤
-                    await usePasswordButton.waitFor({ state: 'visible', timeout: 7000 });
+                    const usePasswordRoleButton = page.locator('[role="button"]:has-text("使用密码"), [role="button"]:has-text("Use your password")');
+                    const count = await usePasswordRoleButton.count();
                     
-                    this.bot.log(this.bot.isMobile, '登录', '检测到"使用密码"选项，正在点击...');
-                    await usePasswordButton.click();
-                    await this.bot.utils.wait(3000); // 等待页面跳转
-
+                    if (count > 0) {
+                        for (let i = 0; i < count && !clicked; i++) {
+                            const element = usePasswordRoleButton.nth(i);
+                            if (await element.isVisible({ timeout: 2000 })) {
+                                this.bot.log(this.bot.isMobile, '登录', '检测到"使用密码"选项，正在点击...');
+                                await element.scrollIntoViewIfNeeded();
+                                await element.click({ timeout: 5000 });
+                                clicked = true;
+                                await this.bot.utils.wait(3000); // 等待页面跳转
+                                break;
+                            }
+                        }
+                    }
                 } catch (e) {
-                    // 如果按钮未出现，这是正常情况，直接继续
+                    this.bot.log(this.bot.isMobile, '登录', `方法1失败: ${e instanceof Error ? e.message : String(e)}`, 'warn');
+                }
+                
+                // 方法2：使用span标签选择器
+                if (!clicked) {
+                    try {
+                        const usePasswordSpan = page.locator('span:has-text("使用密码"), span:has-text("Use your password")');
+                        const count = await usePasswordSpan.count();
+                        
+                        if (count > 0) {
+                            for (let i = 0; i < count && !clicked; i++) {
+                                const element = usePasswordSpan.nth(i);
+                                if (await element.isVisible({ timeout: 2000 })) {
+                                    this.bot.log(this.bot.isMobile, '登录', '检测到"使用密码"选项，正在点击...');
+                                    await element.scrollIntoViewIfNeeded();
+                                    await element.click({ timeout: 5000 });
+                                    clicked = true;
+                                    await this.bot.utils.wait(3000); // 等待页面跳转
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        this.bot.log(this.bot.isMobile, '登录', `方法2失败: ${e instanceof Error ? e.message : String(e)}`, 'warn');
+                    }
+                }
+                
+                // 方法3：使用JavaScript点击
+                if (!clicked) {
+                    try {
+                        const jsResult = await page.evaluate(() => {
+                            const elements = Array.from(document.querySelectorAll('*')).filter(el => {
+                                const text = el.textContent || '';
+                                return text.includes('使用密码') || text.includes('Use your password') || text.includes('密码登录') || text.includes('Password login');
+                            });
+                            
+                            if (elements.length > 0) {
+                                for (const el of elements) {
+                                    const htmlEl = el as HTMLElement;
+                                    if (htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0) {
+                                        htmlEl.click();
+                                        return { success: true, element: htmlEl.tagName, text: htmlEl.textContent };
+                                    }
+                                }
+                            }
+                            return { success: false, reason: 'No visible elements found' };
+                        });
+                        
+                        if (jsResult.success) {
+                            clicked = true;
+                            this.bot.log(this.bot.isMobile, '登录', `JavaScript点击成功: ${jsResult.element} - ${jsResult.text}`);
+                            await this.bot.utils.wait(3000); // 等待页面跳转
+                        }
+                    } catch (e) {
+                        this.bot.log(this.bot.isMobile, '登录', `JavaScript点击失败: ${e instanceof Error ? e.message : String(e)}`, 'warn');
+                    }
+                }
+                
+                if (!clicked) {
                     this.bot.log(this.bot.isMobile, '登录', '未找到"使用密码"按钮，将直接尝试输入密码。');
                 }
             }
