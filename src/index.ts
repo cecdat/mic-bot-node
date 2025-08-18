@@ -10,6 +10,7 @@ import { log } from './util/Logger';
 import Util from './util/Utils';
 import { loadAccounts, loadConfig, loadNodeConfig, loadDailyPoints, saveDailyPoints } from './util/Load';
 import { LogServer } from './util/LogServer';
+import { LogPusher } from './util/LogPusher';
 import { accountStatusManager } from './util/AccountStatusManager';
 import { aiOrchestrator } from './util/AIOrcestrator';
 import { Login } from './functions/Login';
@@ -462,6 +463,18 @@ async function main() {
         logServer.start();
     }
 
+    // 启动日志推送服务
+    let logPusher: LogPusher | null = null;
+    if (config.logPush?.enabled) {
+        logPusher = new LogPusher({
+            enabled: config.logPush.enabled,
+            serverUrl: config.logPush.serverUrl,
+            token: config.logPush.token,
+            interval: config.logPush.interval
+        });
+        logPusher.start();
+    }
+
     // 确保 searchSettings 总是有默认值
     if (!config.searchSettings) {
         config.searchSettings = {
@@ -495,11 +508,17 @@ async function main() {
             };
 
             // 将重组后的配置与本地配置合并，远程的 searchSettings 会覆盖本地的
-            // 同时合入 service 端下发的并发数 clusters
+            // 同时合入 service 端下发的并发数 clusters 和日志推送配置
             config = {
                 ...config,
                 searchSettings: remoteSearchSettings,
-                clusters: (nodeConfig as any).clusters
+                clusters: (nodeConfig as any).clusters,
+                logPush: {
+                    enabled: nodeConfig.log_push_enabled || false,
+                    serverUrl: `${config.apiServer?.updateUrl}logs/receive`,
+                    token: config.apiServer?.token || '',
+                    interval: nodeConfig.log_push_interval || 30
+                }
             };
 
             log('main', '主流程', '已成功合并远程节点配置。');

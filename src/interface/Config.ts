@@ -17,6 +17,13 @@ export interface ConfigLogServer {
     port: number;
 }
 
+export interface ConfigLogPush {
+    enabled: boolean;
+    serverUrl: string;
+    token: string;
+    interval: number; // 推送间隔（秒）
+}
+
 export interface ConfigSearchDelay {
     min: number | string;
     max: number | string;
@@ -103,6 +110,7 @@ export interface Config {
     apiServer: ConfigApiServer;
     hotSearchApi: ConfigHotSearchApi;
     logServer?: ConfigLogServer;
+    logPush?: ConfigLogPush;
     snapshots?: ConfigSnapshots;
     debugOptions?: ConfigDebugOptions;
 }

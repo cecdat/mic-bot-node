@@ -22,6 +22,9 @@ export interface NodeConfig {
     clusters: number;
     search_delay_min: string;
     search_delay_max: string;
+    // 日志推送配置
+    log_push_enabled?: boolean;
+    log_push_interval?: number;
 }
 
 export async function loadNodeConfig(): Promise<NodeConfig | null> {
