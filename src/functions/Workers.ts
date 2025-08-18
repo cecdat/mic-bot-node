@@ -74,203 +74,39 @@ export class Workers {
                     this.bot.log(this.bot.isMobile, '活动执行', `保存任务执行前快照失败: ${snapshotError}`, 'warn');
                 }
             }
-            
-            const selector = task.destinationUrl;
-            if (!selector) {
-                this.bot.log(this.bot.isMobile, '活动执行', `跳过任务 "${task.title}" | 原因: 缺少目标URL！`, 'warn');
-                return;
-            }
 
             // 检查页面是否有效
             if (currentPage.isClosed()) {
                 throw new Error('当前页面已关闭，无法执行任务');
             }
 
-            // 增加页面加载等待和重试机制
-            let loadSuccess = false;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                try {
-                    // 检查页面状态
-                    if (currentPage.isClosed()) {
-                        throw new Error('页面在执行过程中被关闭');
-                    }
-
-                    await currentPage.goto(selector, { referer: this.bot.config.baseURL });
-                    
-                    // 再次检查页面状态
-                    if (currentPage.isClosed()) {
-                        throw new Error('页面在导航过程中被关闭');
-                    }
-
-                    await currentPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-                    await this.bot.utils.wait(3000); // 增加等待时间
-                    loadSuccess = true;
-                    break;
-                } catch (loadError) {
-                    if (attempt === 3) {
-                        throw loadError;
-                    }
-                    this.bot.log(this.bot.isMobile, '活动执行', `页面加载尝试 ${attempt} 失败，重试中...`, 'warn');
-
-                    await this.bot.utils.wait(2000);
-                }
+            // 对于 urlreward 类型的任务，使用简化的处理逻辑
+            if (task.promotionType === 'urlreward') {
+                await this.handleUrlRewardTask(currentPage, task);
+                return;
             }
 
-            if (!loadSuccess) {
-                throw new Error('页面加载最终失败');
+            // 其他类型的任务，导航到目标页面并查找活动元素
+            const selector = task.destinationUrl;
+            if (!selector) {
+                this.bot.log(this.bot.isMobile, '活动执行', `跳过任务 "${task.title}" | 原因: 缺少目标URL！`, 'warn');
+                return;
             }
 
-            // 最终检查页面状态
-            if (currentPage.isClosed()) {
-                throw new Error('页面在加载完成后被关闭');
+            // 导航到任务页面
+            await this.navigateToTaskPage(currentPage, selector);
+
+            // 查找活动元素
+            const activityLocator = await this.findActivityElement(currentPage, task);
+
+            if (activityLocator) {
+                this.bot.log(this.bot.isMobile, '活动执行', '成功定位到目标元素，开始执行点击');
+                await activityLocator.click();
+                await this.bot.utils.wait(2000);
+            } else {
+                throw new Error(`无法找到任务 "${task.title}" 的目标元素`);
             }
 
-            // 尝试多种元素定位策略
-            let activityLocator = null;
-            let elementFound = false;
-
-            // 策略1: 尝试使用URL作为选择器
-            try {
-                activityLocator = currentPage.locator(selector);
-                const isVisible = await activityLocator.isVisible({ timeout: 5000 }).catch(() => false);
-                if (isVisible) {
-                    elementFound = true;
-                    this.bot.log(this.bot.isMobile, '活动执行', `使用URL选择器找到元素`);
-                }
-            } catch (error) {
-                this.bot.log(this.bot.isMobile, '活动执行', `URL选择器失败: ${error}`, 'warn');
-            }
-
-            // 策略2: 尝试查找常见的活动元素
-            if (!elementFound) {
-                try {
-                    const commonSelectors = [
-                        '.pointLink',
-                        '[data-bi-id*="Rewards"]',
-                        '.offer-cta',
-                        '.activity-link',
-                        'a[href*="rewards"]',
-                        'button[onclick*="rewards"]'
-                    ];
-
-                    for (const commonSelector of commonSelectors) {
-                        try {
-                            const locator = currentPage.locator(commonSelector);
-                            const count = await locator.count();
-                            if (count > 0) {
-                                const firstElement = locator.first();
-                                if (await firstElement.isVisible({ timeout: 3000 }).catch(() => false)) {
-                                    activityLocator = firstElement;
-                                    elementFound = true;
-                                    this.bot.log(this.bot.isMobile, '活动执行', `使用通用选择器找到元素: ${commonSelector}`);
-                                    break;
-                                }
-                            }
-                        } catch (selectorError) {
-                            // 继续尝试下一个选择器
-                        }
-                    }
-                } catch (error) {
-                    this.bot.log(this.bot.isMobile, '活动执行', `通用选择器策略失败: ${error}`, 'warn');
-                }
-            }
-
-            // 策略3: 尝试查找包含任务标题的链接
-            if (!elementFound) {
-                try {
-                    const titleKeywords = task.title.toLowerCase().split(' ');
-                    const linkLocator = currentPage.locator('a, button');
-                    const count = await linkLocator.count();
-                    
-                    for (let i = 0; i < Math.min(count, 20); i++) { // 限制检查前20个元素
-                        try {
-                            const element = linkLocator.nth(i);
-                            const text = await element.textContent().catch(() => '');
-                            
-                            if (text && titleKeywords.some(keyword => text.toLowerCase().includes(keyword))) {
-                                if (await element.isVisible({ timeout: 3000 }).catch(() => false)) {
-                                    activityLocator = element;
-                                    elementFound = true;
-                                    this.bot.log(this.bot.isMobile, '活动执行', `通过标题关键词找到元素: "${text}"`);
-                                    break;
-                                }
-                            }
-                        } catch (elementError) {
-                            // 继续检查下一个元素
-                        }
-                    }
-                } catch (error) {
-                    this.bot.log(this.bot.isMobile, '活动执行', `标题关键词策略失败: ${error}`, 'warn');
-                }
-            }
-
-            if (!elementFound || !activityLocator) {
-                // 根据配置决定是否收集调试信息
-                if (this.bot.config.debugOptions?.saveTaskDebugInfo) {
-                    this.bot.log(this.bot.isMobile, '活动执行', `任务 "${task.title}" 定位失败，正在收集调试信息...`, 'warn');
-                    
-                    // 保存页面截图和HTML用于调试
-                    if (this.bot.config.debugOptions?.saveTaskScreenshots || this.bot.config.debugOptions?.saveTaskHtml) {
-                        try {
-                            const debugDir = path.join(this.bot.config.sessionPath, 'debug');
-                            await fs.promises.mkdir(debugDir, { recursive: true });
-                            
-                            const timestamp = Date.now();
-                            const taskName = task.title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
-                            
-                            if (this.bot.config.debugOptions?.saveTaskScreenshots) {
-                                const screenshotPath = path.join(debugDir, `task_${taskName}_${timestamp}.png`);
-                                await currentPage.screenshot({ path: screenshotPath, fullPage: true });
-                                this.bot.log(this.bot.isMobile, '活动执行', `任务截图已保存: ${screenshotPath}`, 'warn');
-                            }
-                            
-                            if (this.bot.config.debugOptions?.saveTaskHtml) {
-                                const htmlPath = path.join(debugDir, `task_${taskName}_${timestamp}.html`);
-                                const pageHtml = await currentPage.content();
-                                await fs.promises.writeFile(htmlPath, pageHtml);
-                                this.bot.log(this.bot.isMobile, '活动执行', `任务HTML已保存: ${htmlPath}`, 'warn');
-                            }
-                        } catch (debugError) {
-                            this.bot.log(this.bot.isMobile, '活动执行', `保存调试信息失败: ${debugError}`, 'warn');
-                        }
-                    }
-                    
-                    // 记录任务详细信息
-                    if (this.bot.config.debugOptions?.logTaskDetails) {
-                        this.bot.log(this.bot.isMobile, '活动执行', `任务详情:`, 'warn');
-                        this.bot.log(this.bot.isMobile, '活动执行', `  - 标题: ${task.title}`, 'warn');
-                        this.bot.log(this.bot.isMobile, '活动执行', `  - 类型: ${task.promotionType}`, 'warn');
-                        this.bot.log(this.bot.isMobile, '活动执行', `  - 目标URL: ${task.destinationUrl}`, 'warn');
-                        this.bot.log(this.bot.isMobile, '活动执行', `  - 完成状态: ${task.complete}`, 'warn');
-                        this.bot.log(this.bot.isMobile, '活动执行', `  - 积分: ${task.pointProgress}/${task.pointProgressMax}`, 'warn');
-                        
-                        // 检查页面上的所有链接和按钮
-                        try {
-                            const allLinks = await currentPage.locator('a, button').count();
-                            const allTexts = await currentPage.locator('a, button').allTextContents();
-                            this.bot.log(this.bot.isMobile, '活动执行', `页面上共有 ${allLinks} 个链接/按钮`, 'warn');
-                            this.bot.log(this.bot.isMobile, '活动执行', `前10个元素文本: ${allTexts.slice(0, 10).join(', ')}`, 'warn');
-                        } catch (countError) {
-                            this.bot.log(this.bot.isMobile, '活动执行', `统计页面元素失败: ${countError}`, 'warn');
-                        }
-                    }
-                }
-                
-                throw new Error(`无法找到任务 "${task.title}" 的目标元素，尝试了多种定位策略。请查看调试信息。`);
-            }
-
-            this.bot.log(this.bot.isMobile, '活动执行', `成功定位到目标元素，开始执行点击`);
-            await this.bot.utils.humanClick(activityLocator);
-            
-            // 获取新标签页前检查当前页面状态
-            if (currentPage.isClosed()) {
-                throw new Error('页面在点击后被关闭');
-            }
-
-            const activityTab = await this.bot.browser.utils.getLatestTab(currentPage);
-            
-            await this.routeTaskToSolver(activityTab, task);
-            
             // 任务执行后快照（根据配置决定是否保存）
             if (this.bot.config.snapshots?.taskExecution) {
                 try {
@@ -282,8 +118,8 @@ export class Workers {
                     const snapshotPath = path.join(sessionDir, `task_after_${taskName}_${timestamp}.png`);
                     const htmlPath = path.join(sessionDir, `task_after_${taskName}_${timestamp}.html`);
                     
-                    await activityTab.screenshot({ path: snapshotPath, fullPage: true });
-                    const pageHtml = await activityTab.content();
+                    await currentPage.screenshot({ path: snapshotPath, fullPage: true });
+                    const pageHtml = await currentPage.content();
                     await fs.promises.writeFile(htmlPath, pageHtml);
                     
                     this.bot.log(this.bot.isMobile, '活动执行', `任务执行后快照已保存: ${snapshotPath}, ${htmlPath}`);
@@ -291,6 +127,10 @@ export class Workers {
                     this.bot.log(this.bot.isMobile, '活动执行', `保存任务执行后快照失败: ${snapshotError}`, 'warn');
                 }
             }
+
+            // 路由到具体的任务处理器
+            const activityTab = await this.bot.browser.utils.getLatestTab(currentPage).catch(() => currentPage);
+            await this.routeTaskToSolver(activityTab, task);
             
             await this.bot.utils.wait(2000);
         } catch (error) {
@@ -311,6 +151,139 @@ export class Workers {
             // 对于其他严重错误，可能需要重新考虑是否继续
             this.bot.log(this.bot.isMobile, '活动执行', `任务 "${task.title}" 执行失败，但将继续执行其他任务`, 'warn');
         }
+    }
+
+    /**
+     * 处理 URL 奖励任务
+     */
+    private async handleUrlRewardTask(currentPage: Page, task: UnifiedTask): Promise<void> {
+        try {
+            this.bot.log(this.bot.isMobile, '活动', `发现活动类型: "URL奖励" 标题: "${task.title}"`);
+            
+            // 导航到目标URL
+            await this.navigateToTaskPage(currentPage, task.destinationUrl);
+            
+            // 等待页面加载完成
+            await this.bot.utils.wait(3000);
+            
+            // 对于 URL 奖励任务，通常只需要访问页面即可
+            // 不需要额外的点击操作
+            this.bot.log(this.bot.isMobile, 'URL奖励', '尝试完成URL奖励');
+            
+            // 等待一段时间确保奖励被记录
+            await this.bot.utils.wait(2000);
+            
+            this.bot.log(this.bot.isMobile, 'URL奖励', '成功完成URL奖励');
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, 'URL奖励', `发生错误: ${errorMessage}`, 'error');
+            throw error;
+        }
+    }
+
+    /**
+     * 导航到任务页面
+     */
+    private async navigateToTaskPage(currentPage: Page, url: string): Promise<void> {
+        let loadSuccess = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                // 检查页面状态
+                if (currentPage.isClosed()) {
+                    throw new Error('页面在执行过程中被关闭');
+                }
+
+                // 使用更宽松的导航选项
+                await currentPage.goto(url, { 
+                    referer: this.bot.config.baseURL,
+                    waitUntil: 'domcontentloaded',
+                    timeout: 30000
+                });
+                
+                // 再次检查页面状态
+                if (currentPage.isClosed()) {
+                    throw new Error('页面在导航过程中被关闭');
+                }
+
+                // 等待页面基本加载完成
+                await currentPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+                await this.bot.utils.wait(2000);
+                loadSuccess = true;
+                break;
+            } catch (loadError) {
+                if (attempt === 3) {
+                    throw loadError;
+                }
+                this.bot.log(this.bot.isMobile, '活动执行', `页面加载尝试 ${attempt} 失败，重试中...`, 'warn');
+                await this.bot.utils.wait(2000);
+            }
+        }
+
+        if (!loadSuccess) {
+            throw new Error('页面加载最终失败');
+        }
+    }
+
+    /**
+     * 查找活动元素
+     */
+    private async findActivityElement(currentPage: Page, task: UnifiedTask): Promise<any> {
+        // 策略1: 尝试查找常见的活动元素
+        const commonSelectors = [
+            '.pointLink',
+            '[data-bi-id*="Rewards"]',
+            '.offer-cta',
+            '.activity-link',
+            'a[href*="rewards"]',
+            'button[onclick*="rewards"]',
+            '[role="button"]',
+            'a[href*="bing.com"]',
+            'a[href*="microsoft.com"]',
+            'a[href*="rewards.bing.com"]'
+        ];
+
+        for (const commonSelector of commonSelectors) {
+            try {
+                const locator = currentPage.locator(commonSelector);
+                const count = await locator.count();
+                if (count > 0) {
+                    const firstElement = locator.first();
+                    if (await firstElement.isVisible({ timeout: 3000 }).catch(() => false)) {
+                        this.bot.log(this.bot.isMobile, '活动执行', `使用通用选择器找到元素: ${commonSelector}`);
+                        return firstElement;
+                    }
+                }
+            } catch (selectorError) {
+                // 继续尝试下一个选择器
+            }
+        }
+
+        // 策略2: 尝试查找包含任务标题的链接
+        try {
+            const titleKeywords = task.title.toLowerCase().split(' ');
+            const allLinks = currentPage.locator('a');
+            const count = await allLinks.count();
+            
+            for (let i = 0; i < Math.min(count, 20); i++) {
+                try {
+                    const link = allLinks.nth(i);
+                    const text = await link.textContent();
+                    if (text && titleKeywords.some(keyword => text.toLowerCase().includes(keyword))) {
+                        if (await link.isVisible({ timeout: 2000 }).catch(() => false)) {
+                            this.bot.log(this.bot.isMobile, '活动执行', `通过标题关键词找到元素: ${text}`);
+                            return link;
+                        }
+                    }
+                } catch (linkError) {
+                    // 继续检查下一个链接
+                }
+            }
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '活动执行', `标题关键词搜索失败: ${error}`, 'warn');
+        }
+
+        return null;
     }
 
     private async routeTaskToSolver(activityPage: Page, activity: UnifiedTask) {
@@ -342,7 +315,7 @@ export class Workers {
                 }
                 break;
             case 'urlreward':
-                if (activity.name.toLowerCase().includes('exploreonbing')) {
+                if (activity.name?.toLowerCase().includes('exploreonbing')) {
                     this.bot.log(this.bot.isMobile, '活动', `发现活动类型: "在必应上搜索" 标题: "${activity.title}"`)
                     await this.bot.activities.doSearchOnBing(activityPage, activity)
                 } else {
