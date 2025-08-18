@@ -12,10 +12,7 @@ export interface ConfigHotSearchApi {
     baseUrl: string;
 }
 
-export interface ConfigLogServer {
-    enabled: boolean;
-    port: number;
-}
+
 
 export interface ConfigLogPush {
     enabled: boolean;
@@ -109,7 +106,7 @@ export interface Config {
     ntfy: ConfigNtfy;
     apiServer: ConfigApiServer;
     hotSearchApi: ConfigHotSearchApi;
-    logServer?: ConfigLogServer;
+
     logPush?: ConfigLogPush;
     snapshots?: ConfigSnapshots;
     debugOptions?: ConfigDebugOptions;

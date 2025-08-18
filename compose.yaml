@@ -12,9 +12,7 @@ services:
       # Only timezone and Node environment are needed now
       TZ: "Asia/Shanghai"
       NODE_ENV: "production"
-    ports:
-      # 暴露日志服务器端口
-      - "3001:3001"
+
     # 配置DNS
     dns:
       - 8.8.8.8

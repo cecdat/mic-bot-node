@@ -9,7 +9,7 @@ import BrowserUtil from './browser/BrowserUtil';
 import { log } from './util/Logger';
 import Util from './util/Utils';
 import { loadAccounts, loadConfig, loadNodeConfig, loadDailyPoints, saveDailyPoints } from './util/Load';
-import { LogServer } from './util/LogServer';
+
 import { LogPusher } from './util/LogPusher';
 import { accountStatusManager } from './util/AccountStatusManager';
 import { aiOrchestrator } from './util/AIOrcestrator';
@@ -455,13 +455,7 @@ async function main() {
     const utils = new Util();
 
     // 启动日志服务器
-    if (config.logServer?.enabled) {
-        const logServer = new LogServer({
-            enabled: config.logServer.enabled,
-            port: config.logServer.port
-        });
-        logServer.start();
-    }
+
 
     // 启动日志推送服务
     let logPusher: LogPusher | null = null;
