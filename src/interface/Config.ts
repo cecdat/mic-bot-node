@@ -33,6 +33,19 @@ export interface ConfigWebhook {
 export interface ConfigSnapshots {
     // 登录流程相关快照（HTML/PNG）
     login: boolean;
+    // 任务执行相关快照（HTML/PNG）
+    taskExecution?: boolean;
+}
+
+export interface ConfigDebugOptions {
+    // 是否保存任务调试信息
+    saveTaskDebugInfo?: boolean;
+    // 是否保存任务截图
+    saveTaskScreenshots?: boolean;
+    // 是否保存任务HTML
+    saveTaskHtml?: boolean;
+    // 是否记录任务详细信息
+    logTaskDetails?: boolean;
 }
 
 export interface ConfigNtfy {
@@ -85,4 +98,5 @@ export interface Config {
     apiServer: ConfigApiServer;
     hotSearchApi: ConfigHotSearchApi;
     snapshots?: ConfigSnapshots;
+    debugOptions?: ConfigDebugOptions;
 }
