@@ -12,6 +12,7 @@ class LogManager {
     private logs: LogEntry[] = [];
     private maxLogs: number = 1000; // 最大保存日志条数
     private logIdCounter: number = 0;
+    private listeners: ((logEntry: LogEntry) => void)[] = [];
 
     /**
      * 添加日志条目
@@ -32,6 +33,32 @@ class LogManager {
         // 保持日志数量在限制范围内
         if (this.logs.length > this.maxLogs) {
             this.logs = this.logs.slice(-this.maxLogs);
+        }
+
+        // 通知所有监听器
+        this.listeners.forEach(listener => {
+            try {
+                listener(logEntry);
+            } catch (error) {
+                console.error('日志监听器错误:', error);
+            }
+        });
+    }
+
+    /**
+     * 添加日志监听器
+     */
+    addListener(listener: (logEntry: LogEntry) => void): void {
+        this.listeners.push(listener);
+    }
+
+    /**
+     * 移除日志监听器
+     */
+    removeListener(listener: (logEntry: LogEntry) => void): void {
+        const index = this.listeners.indexOf(listener);
+        if (index > -1) {
+            this.listeners.splice(index, 1);
         }
     }
 
