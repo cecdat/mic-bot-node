@@ -274,7 +274,7 @@ export class MicrosoftRewardsBot {
             if (this.config.workers.doDesktopSearch) await this.activities.doSearch(page, afterActivitiesData, account.email);
             const finalData = await this.browser.func.getDashboardData(page);
             const finalPoints = finalData.userStatus.availablePoints;
-            return { points: finalPoints, gain: finalPoints - initialPointsToday };
+            return { points: finalPoints, gain: finalPoints - initialPointsToday, initialPoints: initialPointsToday };
         } finally {
             await context.close();
         }
@@ -289,8 +289,8 @@ export class MicrosoftRewardsBot {
             await this.login.login(page, account.email, account.password);
             const initialData = await this.browser.func.getDashboardData(page);
             
-            // 移动端使用桌面端完成后的积分作为初始值
-            const mobileInitialPoints = desktopFinalPoints;
+            // 移除未定义的变量引用和未使用的变量
+            // const mobileInitialPoints = desktopFinalPoints;
             
             const tokenPage = await context.newPage();
             try { this.accessToken = await this.login.getMobileAccessToken(tokenPage, account.email); }

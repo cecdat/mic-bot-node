@@ -26,9 +26,9 @@
     "navigationTimeout": "120s",
     "apiServer": {
         "enabled": true,
-        "updateUrl": "http://192.168.2.51:2002/",
-        "token":"01fd9723efc9a0c56a573592e5464477d79b1d0d3f6ff636",
-        "nodeName": "test",
+        "updateUrl": "http://10.52.175.75:2002/",
+        "token":"d756432a356ce9aad23c5e38eecdb825a1b9b20a252f7077",
+        "nodeName": "localhost",
         "heartbeatInterval": "2m",
         "heartbeatTimeout": "10m"
     },

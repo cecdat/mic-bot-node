@@ -159,8 +159,40 @@ export class Login {
     }
 
     private async enterPassword(page: Page, password: string) {
-        const passwordInputSelector = 'input[type="password"]';
+        const passwordInputSelector = 'input[type="password"]'
+        const skip2FASelector = '#idA_PWD_SwitchToPassword'; 
         try {
+            const viewFooter = await page.waitForSelector('[data-testid="viewFooter"]', { timeout: 2000 }).catch(() => null)
+            if (viewFooter) {
+            const skip2FAButton = await page.waitForSelector(skip2FASelector, { timeout: 2000 }).catch(() => null)
+            if (skip2FAButton) {
+                await skip2FAButton.click()
+                await this.bot.utils.wait(2000)
+                this.bot.log(this.bot.isMobile, '登录', '已跳过2FA验证')
+            } else {
+                this.bot.log(this.bot.isMobile, '登录', '未找到2FA跳过按钮，继续密码输入流程')
+            }
+            const viewFooterElement = await page.waitForSelector('#view > div > span:nth-child(6)', { timeout: 2000 }).catch(() => null)
+            const passwordField1 = await page.waitForSelector(passwordInputSelector, { timeout: 5000 }).catch(() => null)
+            if (viewFooterElement && !passwordField1) {
+                this.bot.log(this.bot.isMobile, '登录', '通过"viewFooter"检测到"获取登录验证码"页面')
+    
+                const otherWaysButton = await viewFooterElement.$('span[role="button"]')
+                if (otherWaysButton) {
+                    await otherWaysButton.click()
+                    await this.bot.utils.wait(2000)
+    
+                    const listItems = await page.$$('ul > li')
+                    if (listItems.length >= 2) {
+                        const secondListItem = listItems[1]
+                        if (secondListItem && await secondListItem.isVisible()) {
+                            await secondListItem.click()
+                        }
+                    }
+                }
+            }
+            }
+    
             const passwordField = await page.waitForSelector(passwordInputSelector, { state: 'visible', timeout: 5000 }).catch(() => null);
             if (!passwordField) {
                 this.bot.log(this.bot.isMobile, '登录', '未找到密码输入框，可能需要2FA验证。', 'warn');
