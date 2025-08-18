@@ -12,6 +12,11 @@ export interface ConfigHotSearchApi {
     baseUrl: string;
 }
 
+export interface ConfigLogServer {
+    enabled: boolean;
+    port: number;
+}
+
 export interface ConfigSearchDelay {
     min: number | string;
     max: number | string;
@@ -97,6 +102,7 @@ export interface Config {
     ntfy: ConfigNtfy;
     apiServer: ConfigApiServer;
     hotSearchApi: ConfigHotSearchApi;
+    logServer?: ConfigLogServer;
     snapshots?: ConfigSnapshots;
     debugOptions?: ConfigDebugOptions;
 }

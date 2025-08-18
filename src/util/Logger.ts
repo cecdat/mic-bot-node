@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import { Webhook } from './Webhook';
 import { Ntfy } from './Ntfy';
 import { loadConfig } from './Load';
+import { logManager } from './LogManager';
 
 export async function log(isMobile: boolean | 'main', title: string, message: string, type: 'log' | 'warn' | 'error' = 'log', color?: keyof typeof chalk) {
     const configData = loadConfig();
@@ -17,6 +18,9 @@ export async function log(isMobile: boolean | 'main', title: string, message: st
     const chalkedPlatform = isMobile === 'main' ? chalk.bgCyan('主进程') : isMobile ? chalk.bgBlue('移动端') : chalk.bgMagenta('桌面端');
 
     const cleanStr = `[${currentTime}] [PID: ${process.pid}] [${type.toUpperCase()}] ${platformText} [${title}] ${message}`;
+
+    // 添加到日志管理器
+    logManager.addLog(type, platformText, title, message, process.pid);
 
     // [CORE FIX] Safely check if webhookLogExcludeFunc exists.
     if (!Array.isArray(configData.webhookLogExcludeFunc) || !configData.webhookLogExcludeFunc.some((x: string) => x.toLowerCase() === title.toLowerCase())) {

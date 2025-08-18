@@ -9,6 +9,7 @@ import BrowserUtil from './browser/BrowserUtil';
 import { log } from './util/Logger';
 import Util from './util/Utils';
 import { loadAccounts, loadConfig, loadNodeConfig, loadDailyPoints, saveDailyPoints } from './util/Load';
+import { LogServer } from './util/LogServer';
 import { accountStatusManager } from './util/AccountStatusManager';
 import { aiOrchestrator } from './util/AIOrcestrator';
 import { Login } from './functions/Login';
@@ -451,6 +452,15 @@ async function main() {
     // 步骤 1: 加载本地基础配置，确保 config 是变量 (let)
     let config = loadConfig();
     const utils = new Util();
+
+    // 启动日志服务器
+    if (config.logServer?.enabled) {
+        const logServer = new LogServer({
+            enabled: config.logServer.enabled,
+            port: config.logServer.port
+        });
+        logServer.start();
+    }
 
     // 确保 searchSettings 总是有默认值
     if (!config.searchSettings) {

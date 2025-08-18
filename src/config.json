@@ -42,5 +42,9 @@
     "hotSearchApi": {
         "enabled": true,
         "baseUrl": "https://hots.237890.xyz"
+    },
+    "logServer": {
+        "enabled": true,
+        "port": 3001
     }
 }
