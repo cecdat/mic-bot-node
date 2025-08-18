@@ -6,7 +6,7 @@
     "runOnZeroPoints": false,
     "debug": true,
     "snapshots": {
-        "login": false
+        "login": true
     },
     "saveFingerprint": {
         "mobile": false,
