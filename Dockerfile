@@ -13,6 +13,7 @@ RUN npm run build
 
 # Stage 2: Production Runtime
 FROM mcr.microsoft.com/playwright:v1.52.0-jammy
+#FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/mcr.microsoft.com/playwright:v1.52.0-jammy
 ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app

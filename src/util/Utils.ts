@@ -10,12 +10,66 @@ export default class Util {
     }
 
     async humanClick(locator: Locator): Promise<void> {
-        await locator.hover({ timeout: 10000 });
-        await this.wait(this.randomNumber(50, 200));
-        await locator.dispatchEvent('mousedown');
-        await this.wait(this.randomNumber(30, 100));
-        await locator.dispatchEvent('mouseup');
-        await locator.click({ force: true, timeout: 5000 });
+        try {
+            // 首先检查元素是否存在
+            const isVisible = await locator.isVisible({ timeout: 5000 }).catch(() => false);
+            if (!isVisible) {
+                throw new Error('元素不可见或不存在');
+            }
+
+            // 尝试hover，如果失败则跳过
+            try {
+                await locator.hover({ timeout: 5000 });
+            } catch (hoverError) {
+                console.warn('Hover操作失败，继续执行点击:', hoverError);
+            }
+
+            await this.wait(this.randomNumber(50, 200));
+            
+            // 尝试dispatchEvent，如果失败则跳过
+            try {
+                await locator.dispatchEvent('mousedown');
+                await this.wait(this.randomNumber(30, 100));
+                await locator.dispatchEvent('mouseup');
+            } catch (eventError) {
+                console.warn('鼠标事件分发失败，继续执行点击:', eventError);
+            }
+
+            // 尝试点击，如果失败则重试
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    await locator.click({ timeout: 5000 });
+                    return; // 成功点击，退出函数
+                } catch (clickError) {
+                    const errorMessage = clickError instanceof Error ? clickError.message : String(clickError);
+                    console.warn(`点击尝试 ${attempt}/3 失败: ${errorMessage}`, 'warn');
+                    
+                    if (attempt < 3) {
+                        await this.wait(1000); // 等待1秒后重试
+                    }
+                }
+            }
+
+            // 所有重试都失败了，使用强制点击作为最后手段
+            try {
+                console.warn('所有点击尝试失败，使用强制点击', 'warn');
+                await locator.click({ force: true, timeout: 10000 });
+            } catch (finalClickError) {
+                const finalErrorMessage = finalClickError instanceof Error ? finalClickError.message : String(finalClickError);
+                console.error(`强制点击也失败了: ${finalErrorMessage}`, 'error');
+                throw finalClickError instanceof Error ? finalClickError : new Error(String(finalClickError));
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            console.error('humanClick执行失败:', errorMessage);
+            // 如果所有操作都失败，尝试强制点击
+            try {
+                await locator.click({ force: true, timeout: 3000 });
+            } catch (finalError) {
+                const finalErrorMessage = finalError instanceof Error ? finalError.message : String(finalError);
+                throw new Error(`humanClick完全失败: ${errorMessage}, 强制点击也失败: ${finalErrorMessage}`);
+            }
+        }
     }
 
     getFormattedDate(ms = Date.now()): string {

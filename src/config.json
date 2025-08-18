@@ -6,7 +6,7 @@
     "runOnZeroPoints": false,
     "debug": true,
     "snapshots": {
-        "login": true
+        "login": false
     },
     "saveFingerprint": {
         "mobile": false,
@@ -26,8 +26,8 @@
     "navigationTimeout": "120s",
     "apiServer": {
         "enabled": true,
-        "updateUrl": "http://10.52.175.75:5000/",
-        "token":"bb5b5c6b5989477f21296bdcbb57c8f84269a718a350e525",
+        "updateUrl": "http://192.168.2.51:2002/",
+        "token":"01fd9723efc9a0c56a573592e5464477d79b1d0d3f6ff636",
         "nodeName": "test",
         "heartbeatInterval": "2m",
         "heartbeatTimeout": "10m"

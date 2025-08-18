@@ -42,40 +42,34 @@ export default class BrowserUtil {
         }
     }
 
-    async getLatestTab(page: Page): Promise<Page> {
-        try {
-            await this.bot.utils.wait(1000)
-            const browser = page.context()
-            const pages = browser.pages()
-
-            if (page.isClosed()) {
-                const errorMsg = '无法获取最新的标签页，因为当前页面已关闭。';
-                await this.bot.log(this.bot.isMobile, '获取新标签页', errorMsg, 'error');
-                throw new Error(errorMsg);
-            }
-
-            if (pages.length === 0) {
-                const errorMsg = '无法获取最新的标签页，因为浏览器没有打开的页面。';
-                await this.bot.log(this.bot.isMobile, '获取新标签页', errorMsg, 'error');
-                throw new Error(errorMsg);
-            }
-
-            const newTab = pages[pages.length - 1];
-
-            // [最终修复] 明确检查 undefined，让 TypeScript 编译器满意
-            if (!newTab) {
-                const errorMsg = '无法获取最新的标签页，未能从页面列表中找到最后一个标签。';
-                await this.bot.log(this.bot.isMobile, '获取新标签页', errorMsg, 'error');
-                throw new Error(errorMsg);
-            }
-
-            return newTab;
-
-        } catch (error) {
-            const errorMsg = `获取最新标签页时发生错误: ${error instanceof Error ? error.message : String(error)}`;
-            await this.bot.log(this.bot.isMobile, '获取新标签页', errorMsg, 'error');
-            throw new Error(errorMsg);
+    public async getLatestTab(currentPage: Page): Promise<Page> {
+        // 检查页面是否已关闭
+        if (currentPage.isClosed()) {
+            throw new Error('当前页面已关闭，无法获取最新标签页');
         }
+
+        const pages = currentPage.context().pages();
+        
+        // 过滤掉已关闭的页面
+        const activePages = pages.filter(page => !page.isClosed());
+        
+        if (activePages.length === 0) {
+            throw new Error('没有可用的活动页面');
+        }
+        
+        const newTab = activePages[activePages.length - 1];
+        
+        // 确保newTab不为undefined
+        if (!newTab) {
+            throw new Error('无法获取有效的标签页');
+        }
+        
+        // 最终检查新标签页是否有效
+        if (newTab.isClosed()) {
+            throw new Error('获取到的新标签页已关闭');
+        }
+        
+        return newTab;
     }
 
     async getTabs(page: Page) {
