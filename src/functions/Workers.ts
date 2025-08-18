@@ -1,4 +1,6 @@
 import { Page } from 'rebrowser-playwright'
+import fs from 'fs'
+import path from 'path'
 // [FIX] Removed unused imports for MorePromotion, PromotionalItem, and PunchCard
 import { DashboardData } from '../interface/DashboardData'
 import { UnifiedTask } from '../util/AIOrcestrator'
@@ -182,7 +184,46 @@ export class Workers {
             }
 
             if (!elementFound || !activityLocator) {
-                throw new Error(`无法找到任务 "${task.title}" 的目标元素，尝试了多种定位策略`);
+                // 增加更详细的调试信息
+                this.bot.log(this.bot.isMobile, '活动执行', `任务 "${task.title}" 定位失败，正在收集调试信息...`, 'warn');
+                
+                // 保存页面截图和HTML用于调试
+                try {
+                    const debugDir = path.join(this.bot.config.sessionPath, 'debug');
+                    await fs.promises.mkdir(debugDir, { recursive: true });
+                    
+                    const timestamp = Date.now();
+                    const screenshotPath = path.join(debugDir, `task_debug_${timestamp}.png`);
+                    const htmlPath = path.join(debugDir, `task_debug_${timestamp}.html`);
+                    
+                    await currentPage.screenshot({ path: screenshotPath, fullPage: true });
+                    const pageHtml = await currentPage.content();
+                    await fs.promises.writeFile(htmlPath, pageHtml);
+                    
+                    this.bot.log(this.bot.isMobile, '活动执行', `调试信息已保存: ${screenshotPath}, ${htmlPath}`, 'warn');
+                } catch (debugError) {
+                    this.bot.log(this.bot.isMobile, '活动执行', `保存调试信息失败: ${debugError}`, 'warn');
+                }
+                
+                // 记录任务详细信息
+                this.bot.log(this.bot.isMobile, '活动执行', `任务详情:`, 'warn');
+                this.bot.log(this.bot.isMobile, '活动执行', `  - 标题: ${task.title}`, 'warn');
+                this.bot.log(this.bot.isMobile, '活动执行', `  - 类型: ${task.promotionType}`, 'warn');
+                this.bot.log(this.bot.isMobile, '活动执行', `  - 目标URL: ${task.destinationUrl}`, 'warn');
+                this.bot.log(this.bot.isMobile, '活动执行', `  - 完成状态: ${task.complete}`, 'warn');
+                this.bot.log(this.bot.isMobile, '活动执行', `  - 积分: ${task.pointProgress}/${task.pointProgressMax}`, 'warn');
+                
+                // 检查页面上的所有链接和按钮
+                try {
+                    const allLinks = await currentPage.locator('a, button').count();
+                    const allTexts = await currentPage.locator('a, button').allTextContents();
+                    this.bot.log(this.bot.isMobile, '活动执行', `页面上共有 ${allLinks} 个链接/按钮`, 'warn');
+                    this.bot.log(this.bot.isMobile, '活动执行', `前10个元素文本: ${allTexts.slice(0, 10).join(', ')}`, 'warn');
+                } catch (countError) {
+                    this.bot.log(this.bot.isMobile, '活动执行', `统计页面元素失败: ${countError}`, 'warn');
+                }
+                
+                throw new Error(`无法找到任务 "${task.title}" 的目标元素，尝试了多种定位策略。请查看调试信息。`);
             }
 
             this.bot.log(this.bot.isMobile, '活动执行', `成功定位到目标元素，开始执行点击`);
@@ -206,6 +247,15 @@ export class Workers {
             if (error instanceof Error && error.stack) {
                 this.bot.log(this.bot.isMobile, '活动执行', `错误堆栈: ${error.stack}`, 'error');
             }
+            
+            // 对于任务定位失败的情况，记录但继续执行其他任务
+            if (errorMessage.includes('无法找到任务') || errorMessage.includes('目标元素')) {
+                this.bot.log(this.bot.isMobile, '活动执行', `任务 "${task.title}" 定位失败，跳过此任务继续执行其他任务`, 'warn');
+                return; // 跳过此任务，继续执行下一个
+            }
+            
+            // 对于其他严重错误，可能需要重新考虑是否继续
+            this.bot.log(this.bot.isMobile, '活动执行', `任务 "${task.title}" 执行失败，但将继续执行其他任务`, 'warn');
         }
     }
 
