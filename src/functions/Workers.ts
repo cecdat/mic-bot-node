@@ -54,6 +54,27 @@ export class Workers {
         try {
             this.bot.log(this.bot.isMobile, '活动执行', `开始执行任务: "${task.title}"`);
             
+            // 任务执行前快照（根据配置决定是否保存）
+            if (this.bot.config.snapshots?.taskExecution) {
+                try {
+                    const sessionDir = path.join(this.bot.config.sessionPath, 'task_snapshots');
+                    await fs.promises.mkdir(sessionDir, { recursive: true });
+                    
+                    const timestamp = Date.now();
+                    const taskName = task.title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
+                    const snapshotPath = path.join(sessionDir, `task_before_${taskName}_${timestamp}.png`);
+                    const htmlPath = path.join(sessionDir, `task_before_${taskName}_${timestamp}.html`);
+                    
+                    await currentPage.screenshot({ path: snapshotPath, fullPage: true });
+                    const pageHtml = await currentPage.content();
+                    await fs.promises.writeFile(htmlPath, pageHtml);
+                    
+                    this.bot.log(this.bot.isMobile, '活动执行', `任务执行前快照已保存: ${snapshotPath}, ${htmlPath}`);
+                } catch (snapshotError) {
+                    this.bot.log(this.bot.isMobile, '活动执行', `保存任务执行前快照失败: ${snapshotError}`, 'warn');
+                }
+            }
+            
             const selector = task.destinationUrl;
             if (!selector) {
                 this.bot.log(this.bot.isMobile, '活动执行', `跳过任务 "${task.title}" | 原因: 缺少目标URL！`, 'warn');
@@ -184,43 +205,55 @@ export class Workers {
             }
 
             if (!elementFound || !activityLocator) {
-                // 增加更详细的调试信息
-                this.bot.log(this.bot.isMobile, '活动执行', `任务 "${task.title}" 定位失败，正在收集调试信息...`, 'warn');
-                
-                // 保存页面截图和HTML用于调试
-                try {
-                    const debugDir = path.join(this.bot.config.sessionPath, 'debug');
-                    await fs.promises.mkdir(debugDir, { recursive: true });
+                // 根据配置决定是否收集调试信息
+                if (this.bot.config.debugOptions?.saveTaskDebugInfo) {
+                    this.bot.log(this.bot.isMobile, '活动执行', `任务 "${task.title}" 定位失败，正在收集调试信息...`, 'warn');
                     
-                    const timestamp = Date.now();
-                    const screenshotPath = path.join(debugDir, `task_debug_${timestamp}.png`);
-                    const htmlPath = path.join(debugDir, `task_debug_${timestamp}.html`);
+                    // 保存页面截图和HTML用于调试
+                    if (this.bot.config.debugOptions?.saveTaskScreenshots || this.bot.config.debugOptions?.saveTaskHtml) {
+                        try {
+                            const debugDir = path.join(this.bot.config.sessionPath, 'debug');
+                            await fs.promises.mkdir(debugDir, { recursive: true });
+                            
+                            const timestamp = Date.now();
+                            const taskName = task.title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
+                            
+                            if (this.bot.config.debugOptions?.saveTaskScreenshots) {
+                                const screenshotPath = path.join(debugDir, `task_${taskName}_${timestamp}.png`);
+                                await currentPage.screenshot({ path: screenshotPath, fullPage: true });
+                                this.bot.log(this.bot.isMobile, '活动执行', `任务截图已保存: ${screenshotPath}`, 'warn');
+                            }
+                            
+                            if (this.bot.config.debugOptions?.saveTaskHtml) {
+                                const htmlPath = path.join(debugDir, `task_${taskName}_${timestamp}.html`);
+                                const pageHtml = await currentPage.content();
+                                await fs.promises.writeFile(htmlPath, pageHtml);
+                                this.bot.log(this.bot.isMobile, '活动执行', `任务HTML已保存: ${htmlPath}`, 'warn');
+                            }
+                        } catch (debugError) {
+                            this.bot.log(this.bot.isMobile, '活动执行', `保存调试信息失败: ${debugError}`, 'warn');
+                        }
+                    }
                     
-                    await currentPage.screenshot({ path: screenshotPath, fullPage: true });
-                    const pageHtml = await currentPage.content();
-                    await fs.promises.writeFile(htmlPath, pageHtml);
-                    
-                    this.bot.log(this.bot.isMobile, '活动执行', `调试信息已保存: ${screenshotPath}, ${htmlPath}`, 'warn');
-                } catch (debugError) {
-                    this.bot.log(this.bot.isMobile, '活动执行', `保存调试信息失败: ${debugError}`, 'warn');
-                }
-                
-                // 记录任务详细信息
-                this.bot.log(this.bot.isMobile, '活动执行', `任务详情:`, 'warn');
-                this.bot.log(this.bot.isMobile, '活动执行', `  - 标题: ${task.title}`, 'warn');
-                this.bot.log(this.bot.isMobile, '活动执行', `  - 类型: ${task.promotionType}`, 'warn');
-                this.bot.log(this.bot.isMobile, '活动执行', `  - 目标URL: ${task.destinationUrl}`, 'warn');
-                this.bot.log(this.bot.isMobile, '活动执行', `  - 完成状态: ${task.complete}`, 'warn');
-                this.bot.log(this.bot.isMobile, '活动执行', `  - 积分: ${task.pointProgress}/${task.pointProgressMax}`, 'warn');
-                
-                // 检查页面上的所有链接和按钮
-                try {
-                    const allLinks = await currentPage.locator('a, button').count();
-                    const allTexts = await currentPage.locator('a, button').allTextContents();
-                    this.bot.log(this.bot.isMobile, '活动执行', `页面上共有 ${allLinks} 个链接/按钮`, 'warn');
-                    this.bot.log(this.bot.isMobile, '活动执行', `前10个元素文本: ${allTexts.slice(0, 10).join(', ')}`, 'warn');
-                } catch (countError) {
-                    this.bot.log(this.bot.isMobile, '活动执行', `统计页面元素失败: ${countError}`, 'warn');
+                    // 记录任务详细信息
+                    if (this.bot.config.debugOptions?.logTaskDetails) {
+                        this.bot.log(this.bot.isMobile, '活动执行', `任务详情:`, 'warn');
+                        this.bot.log(this.bot.isMobile, '活动执行', `  - 标题: ${task.title}`, 'warn');
+                        this.bot.log(this.bot.isMobile, '活动执行', `  - 类型: ${task.promotionType}`, 'warn');
+                        this.bot.log(this.bot.isMobile, '活动执行', `  - 目标URL: ${task.destinationUrl}`, 'warn');
+                        this.bot.log(this.bot.isMobile, '活动执行', `  - 完成状态: ${task.complete}`, 'warn');
+                        this.bot.log(this.bot.isMobile, '活动执行', `  - 积分: ${task.pointProgress}/${task.pointProgressMax}`, 'warn');
+                        
+                        // 检查页面上的所有链接和按钮
+                        try {
+                            const allLinks = await currentPage.locator('a, button').count();
+                            const allTexts = await currentPage.locator('a, button').allTextContents();
+                            this.bot.log(this.bot.isMobile, '活动执行', `页面上共有 ${allLinks} 个链接/按钮`, 'warn');
+                            this.bot.log(this.bot.isMobile, '活动执行', `前10个元素文本: ${allTexts.slice(0, 10).join(', ')}`, 'warn');
+                        } catch (countError) {
+                            this.bot.log(this.bot.isMobile, '活动执行', `统计页面元素失败: ${countError}`, 'warn');
+                        }
+                    }
                 }
                 
                 throw new Error(`无法找到任务 "${task.title}" 的目标元素，尝试了多种定位策略。请查看调试信息。`);
@@ -237,6 +270,27 @@ export class Workers {
             const activityTab = await this.bot.browser.utils.getLatestTab(currentPage);
             
             await this.routeTaskToSolver(activityTab, task);
+            
+            // 任务执行后快照（根据配置决定是否保存）
+            if (this.bot.config.snapshots?.taskExecution) {
+                try {
+                    const sessionDir = path.join(this.bot.config.sessionPath, 'task_snapshots');
+                    await fs.promises.mkdir(sessionDir, { recursive: true });
+                    
+                    const timestamp = Date.now();
+                    const taskName = task.title.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
+                    const snapshotPath = path.join(sessionDir, `task_after_${taskName}_${timestamp}.png`);
+                    const htmlPath = path.join(sessionDir, `task_after_${taskName}_${timestamp}.html`);
+                    
+                    await activityTab.screenshot({ path: snapshotPath, fullPage: true });
+                    const pageHtml = await activityTab.content();
+                    await fs.promises.writeFile(htmlPath, pageHtml);
+                    
+                    this.bot.log(this.bot.isMobile, '活动执行', `任务执行后快照已保存: ${snapshotPath}, ${htmlPath}`);
+                } catch (snapshotError) {
+                    this.bot.log(this.bot.isMobile, '活动执行', `保存任务执行后快照失败: ${snapshotError}`, 'warn');
+                }
+            }
             
             await this.bot.utils.wait(2000);
         } catch (error) {
