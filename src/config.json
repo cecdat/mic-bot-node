@@ -6,14 +6,14 @@
     "runOnZeroPoints": false,
     "debug": true,
     "snapshots": {
-        "login": true,
-        "taskExecution": true
+        "login": false,
+        "taskExecution": false
     },
     "debugOptions": {
-        "saveTaskDebugInfo": true,
-        "saveTaskScreenshots": true,
-        "saveTaskHtml": true,
-        "logTaskDetails": true
+        "saveTaskDebugInfo": false,
+        "saveTaskScreenshots": false,
+        "saveTaskHtml": false,
+        "logTaskDetails": false
     },
     "saveFingerprint": {
         "mobile": false,
