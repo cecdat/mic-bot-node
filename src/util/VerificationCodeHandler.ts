@@ -246,11 +246,11 @@ export class VerificationCodeHandler {
                     return { 
                         found: true, 
                         tagName: firstElement.tagName,
-                        text: firstElement.textContent?.substring(0, 100),
-                        className: firstElement.className
+                        text: firstElement.textContent?.substring(0, 100) || '',
+                        className: firstElement.className || ''
                     };
                 }
-                return { found: false };
+                return { found: false, tagName: '', text: '', className: '' };
             });
 
             if (jsResult.found) {
@@ -260,7 +260,7 @@ export class VerificationCodeHandler {
                     `${jsResult.tagName}:has-text("发送电子邮件")`,
                     `${jsResult.tagName}:has-text("Send email")`,
                     `${jsResult.tagName}:has-text("@")`,
-                    `${jsResult.tagName}.${jsResult.className.split(' ')[0]}`,
+                    jsResult.className ? `${jsResult.tagName}.${jsResult.className.split(' ')[0]}` : jsResult.tagName,
                     jsResult.tagName
                 ];
 
