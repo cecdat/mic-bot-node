@@ -182,7 +182,7 @@ export class VerificationCodeHandler {
                 
                 for (const el of elements) {
                     const htmlEl = el as HTMLElement;
-                    if (htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0 && htmlEl.click) {
+                    if (htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0) {
                         return { found: true, tagName: htmlEl.tagName };
                     }
                 }
