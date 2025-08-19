@@ -24,9 +24,10 @@ export class VerificationCodeHandler {
      * 处理辅助邮箱验证码
      * @param page Playwright页面对象
      * @param accountEmail 主账户邮箱
+     * @param deviceType 设备类型 ('pc' | 'mobile')
      * @returns 是否成功处理验证码
      */
-    async handleAuxiliaryEmailVerification(page: Page, accountEmail: string): Promise<boolean> {
+    async handleAuxiliaryEmailVerification(page: Page, accountEmail: string, deviceType: string = 'pc'): Promise<boolean> {
         if (!this.config.auxiliary_email) {
             log('main', '验证码处理', `账户 ${accountEmail} 未配置辅助邮箱，跳过验证码处理`);
             return false;
@@ -36,7 +37,7 @@ export class VerificationCodeHandler {
             log('main', '验证码处理', `开始处理账户 ${accountEmail} 的辅助邮箱验证码`);
 
             // 等待验证码输入页面加载
-            await this.waitForVerificationPage(page);
+            await this.waitForVerificationPage(page, deviceType);
 
             // 检查是否需要发送验证码
             if (await this.needsToSendCode(page)) {
@@ -72,13 +73,13 @@ export class VerificationCodeHandler {
     /**
      * 等待验证码页面加载
      */
-    private async waitForVerificationPage(page: Page): Promise<void> {
+    private async waitForVerificationPage(page: Page, deviceType: string = 'pc'): Promise<void> {
         try {
             // 首先检查是否在身份验证选择页面
             const isIdentityVerificationPage = await this.isIdentityVerificationPage(page);
             if (isIdentityVerificationPage) {
                 log('main', '验证码处理', '检测到身份验证选择页面，准备发送验证码');
-                await this.handleIdentityVerificationPage(page);
+                await this.handleIdentityVerificationPage(page, deviceType);
                 return;
             }
 
@@ -147,7 +148,7 @@ export class VerificationCodeHandler {
     /**
      * 处理身份验证选择页面
      */
-    private async handleIdentityVerificationPage(page: Page): Promise<void> {
+    private async handleIdentityVerificationPage(page: Page, deviceType: string = 'pc'): Promise<void> {
         try {
             log('main', '验证码处理', '正在处理身份验证选择页面');
 
@@ -161,22 +162,19 @@ export class VerificationCodeHandler {
                 await page.waitForTimeout(3000);
                 
                 // 保存点击后的页面快照
-                const timestamp = Date.now();
-                const snapshotName = `verification_after_click_${timestamp}`;
-                await this.savePageSnapshot(page, snapshotName);
-                log('main', '验证码处理', `已保存点击后页面快照: ${snapshotName}`);
+                await this.savePageSnapshot(page, 'verification_after_click', deviceType);
+                log('main', '验证码处理', `已保存点击后页面快照`);
                 
                 // 检查是否跳转到辅助邮箱输入页面
                 const isAuxiliaryEmailPage = await this.isAuxiliaryEmailInputPage(page);
                 if (isAuxiliaryEmailPage) {
                     log('main', '验证码处理', '已跳转到辅助邮箱输入页面');
-                    await this.handleAuxiliaryEmailInputPage(page);
+                    await this.handleAuxiliaryEmailInputPage(page, deviceType);
                 } else {
                     log('main', '验证码处理', '未跳转到辅助邮箱输入页面，尝试其他方法', 'warn');
                     // 保存当前页面状态用于调试
-                    const debugSnapshotName = `verification_debug_${timestamp}`;
-                    await this.savePageSnapshot(page, debugSnapshotName);
-                    log('main', '验证码处理', `已保存调试页面快照: ${debugSnapshotName}`);
+                    await this.savePageSnapshot(page, 'verification_debug', deviceType);
+                    log('main', '验证码处理', `已保存调试页面快照`);
                 }
             } else {
                 log('main', '验证码处理', '未找到发送电子邮件选项', 'error');
@@ -300,10 +298,30 @@ export class VerificationCodeHandler {
      */
     private async isAuxiliaryEmailInputPage(page: Page): Promise<boolean> {
         try {
+            // 检查页面标题
+            const title = await page.title();
+            if (title.includes('验证你的电子邮件') || title.includes('Verify your email')) {
+                log('main', '验证码处理', '通过页面标题检测到辅助邮箱输入页面');
+                return true;
+            }
+
             // 检查页面是否包含邮箱输入框
-            const emailInput = await page.$('input[type="email"], input[name="email"]');
-            return !!emailInput;
-        } catch {
+            const emailInput = await page.$('input[type="email"], input[name="email"], #proof-confirmation-email-input');
+            if (emailInput) {
+                log('main', '验证码处理', '通过输入框检测到辅助邮箱输入页面');
+                return true;
+            }
+
+            // 检查页面内容
+            const pageText = await page.textContent('body');
+            if (pageText && (pageText.includes('验证你的电子邮件') || pageText.includes('发送代码'))) {
+                log('main', '验证码处理', '通过页面内容检测到辅助邮箱输入页面');
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            log('main', '验证码处理', `检查辅助邮箱输入页面时出错: ${error}`, 'error');
             return false;
         }
     }
@@ -311,25 +329,29 @@ export class VerificationCodeHandler {
     /**
      * 处理辅助邮箱输入页面
      */
-    private async handleAuxiliaryEmailInputPage(page: Page): Promise<void> {
+    private async handleAuxiliaryEmailInputPage(page: Page, deviceType: string = 'pc'): Promise<void> {
         try {
             log('main', '验证码处理', '正在处理辅助邮箱输入页面');
 
-            // 查找邮箱输入框
-            const emailInput = await page.$('input[type="email"], input[name="email"]');
+            // 查找邮箱输入框（多种选择器）
+            const emailInput = await page.$('#proof-confirmation-email-input, input[type="email"], input[name="email"], input[type="text"]');
             if (!emailInput) {
                 throw new Error('未找到邮箱输入框');
             }
 
-            // 填入辅助邮箱
-            await emailInput.fill(this.config.auxiliary_email!);
+            // 清空输入框并填入辅助邮箱
+            await emailInput.fill('');
+            await emailInput.type(this.config.auxiliary_email!);
             log('main', '验证码处理', `已填入辅助邮箱: ${this.config.auxiliary_email}`);
 
+            // 等待一下确保输入完成
+            await page.waitForTimeout(1000);
+
             // 查找并点击发送按钮
-            const sendButton = await page.$('button[type="submit"], button:has-text("发送"), button:has-text("Send")');
+            const sendButton = await page.$('button[type="submit"], button:has-text("发送验证码"), button:has-text("Send"), [data-testid="primaryButton"]');
             if (sendButton) {
                 await sendButton.click();
-                log('main', '验证码处理', '已点击发送按钮');
+                log('main', '验证码处理', '已点击发送验证码按钮');
                 
                 // 等待发送确认
                 await page.waitForTimeout(3000);
@@ -474,7 +496,7 @@ export class VerificationCodeHandler {
     /**
      * 保存页面快照
      */
-    private async savePageSnapshot(page: Page, snapshotName: string): Promise<void> {
+    private async savePageSnapshot(page: Page, snapshotName: string, deviceType: string = 'pc'): Promise<void> {
         try {
             // 保存HTML快照
             const htmlContent = await page.content();
@@ -487,12 +509,16 @@ export class VerificationCodeHandler {
                 fs.mkdirSync(snapshotDir, { recursive: true });
             }
             
+            // 生成带设备类型和序号的文件名
+            const timestamp = Date.now();
+            const fileName = `${deviceType}_${snapshotName}_${timestamp}`;
+            
             // 保存HTML文件
-            const htmlPath = path.join(snapshotDir, `${snapshotName}.html`);
+            const htmlPath = path.join(snapshotDir, `${fileName}.html`);
             fs.writeFileSync(htmlPath, htmlContent);
             
             // 保存截图
-            const screenshotPath = path.join(snapshotDir, `${snapshotName}.png`);
+            const screenshotPath = path.join(snapshotDir, `${fileName}.png`);
             await page.screenshot({ path: screenshotPath, fullPage: true });
             
             log('main', '验证码处理', `页面快照已保存: ${htmlPath}, ${screenshotPath}`);

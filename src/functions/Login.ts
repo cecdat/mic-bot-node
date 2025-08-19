@@ -314,7 +314,8 @@ export class Login {
             });
 
             // 处理验证码
-            const success = await verificationHandler.handleAuxiliaryEmailVerification(page, email);
+            const deviceType = this.bot.isMobile ? 'mobile' : 'pc';
+            const success = await verificationHandler.handleAuxiliaryEmailVerification(page, email, deviceType);
             if (success) {
                 this.bot.log(this.bot.isMobile, '登录', `账户 ${email} 辅助邮箱验证码处理成功`);
             } else {
