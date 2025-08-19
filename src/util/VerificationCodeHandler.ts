@@ -10,6 +10,7 @@ export interface VerificationCodeConfig {
 
 export class VerificationCodeHandler {
     private config: VerificationCodeConfig;
+    private currentVerificationId: number | null = null;
 
     constructor(config: VerificationCodeConfig) {
         this.config = {
@@ -52,10 +53,10 @@ export class VerificationCodeHandler {
             }
 
             // 填入验证码
-            await this.enterVerificationCode(page, verificationCode);
+            await this.enterVerificationCode(page, verificationCode, deviceType);
 
             // 等待验证结果
-            const success = await this.waitForVerificationResult(page);
+            const success = await this.waitForVerificationResult(page, deviceType);
             if (success) {
                 log('main', '验证码处理', `账户 ${accountEmail} 验证码验证成功`);
                 return true;
@@ -80,6 +81,14 @@ export class VerificationCodeHandler {
             if (isIdentityVerificationPage) {
                 log('main', '验证码处理', '检测到身份验证选择页面，准备发送验证码');
                 await this.handleIdentityVerificationPage(page, deviceType);
+                return;
+            }
+
+            // 检查是否在"验证你的电子邮件"页面
+            const isEmailVerificationPage = await this.isEmailVerificationPage(page);
+            if (isEmailVerificationPage) {
+                log('main', '验证码处理', '检测到验证你的电子邮件页面，准备处理辅助邮箱输入');
+                await this.handleAuxiliaryEmailInputPage(page, deviceType);
                 return;
             }
 
@@ -294,6 +303,54 @@ export class VerificationCodeHandler {
     }
 
     /**
+     * 检查是否在"验证你的电子邮件"页面
+     */
+    private async isEmailVerificationPage(page: Page): Promise<boolean> {
+        try {
+            // 检查页面标题
+            const title = await page.title();
+            log('main', '验证码处理', `检查验证你的电子邮件页面，标题: ${title}`);
+            
+            if (title.includes('验证你的电子邮件') || title.includes('Verify your email')) {
+                log('main', '验证码处理', '通过页面标题检测到验证你的电子邮件页面');
+                return true;
+            }
+
+            // 检查页面内容
+            const pageText = await page.textContent('body');
+            if (pageText) {
+                const emailVerificationKeywords = [
+                    '验证你的电子邮件',
+                    'Verify your email',
+                    '发送代码',
+                    'Send code',
+                    '我们将向',
+                    'We will send a code to'
+                ];
+
+                for (const keyword of emailVerificationKeywords) {
+                    if (pageText.includes(keyword)) {
+                        log('main', '验证码处理', `通过关键词 "${keyword}" 检测到验证你的电子邮件页面`);
+                        return true;
+                    }
+                }
+            }
+
+            // 检查是否包含邮箱输入框
+            const emailInput = await page.$('input[type="email"], input[name="email"], #proof-confirmation-email-input');
+            if (emailInput) {
+                log('main', '验证码处理', '通过输入框检测到验证你的电子邮件页面');
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            log('main', '验证码处理', `检查验证你的电子邮件页面时出错: ${error}`, 'error');
+            return false;
+        }
+    }
+
+    /**
      * 检查是否在辅助邮箱输入页面
      */
     private async isAuxiliaryEmailInputPage(page: Page): Promise<boolean> {
@@ -384,10 +441,20 @@ export class VerificationCodeHandler {
         try {
             // 点击发送验证码按钮
             await page.click('button[data-testid*="send"], button:has-text("发送"), button:has-text("Send")');
-            log('main', '验证码处理', '已发送验证码到辅助邮箱');
+            log('main', '验证码处理', '已点击发送验证码按钮');
             
             // 等待发送确认
             await page.waitForTimeout(2000);
+            
+            // 调用Service端创建验证码请求
+            const verificationId = await this.requestVerificationCode();
+            if (verificationId) {
+                log('main', '验证码处理', `验证码请求已创建，ID: ${verificationId}`);
+                // 存储验证码ID供后续使用
+                this.currentVerificationId = verificationId;
+            } else {
+                log('main', '验证码处理', '创建验证码请求失败，但继续流程');
+            }
         } catch (error) {
             log('main', '验证码处理', `发送验证码失败: ${error}`, 'error');
             throw error;
@@ -398,52 +465,79 @@ export class VerificationCodeHandler {
      * 等待并获取验证码
      */
     private async waitForVerificationCode(): Promise<string | null> {
-        const startTime = Date.now();
-        const maxWaitTime = this.config.timeout!;
-
-        while (Date.now() - startTime < maxWaitTime) {
-            try {
-                // 这里需要实现从辅助邮箱获取验证码的逻辑
-                // 由于不同邮箱服务商的API不同，这里提供一个框架
-                const code = await this.getCodeFromAuxiliaryEmail();
-                if (code) {
-                    log('main', '验证码处理', `成功获取验证码: ${code}`);
-                    return code;
+        try {
+            log('main', '验证码处理', '开始等待验证码...');
+            
+            // 获取最新的验证码请求ID（从sendVerificationCode方法中创建）
+            const verificationId = await this.getLatestVerificationId();
+            if (!verificationId) {
+                log('main', '验证码处理', '未找到验证码请求，尝试创建新的请求');
+                const newVerificationId = await this.requestVerificationCode();
+                if (!newVerificationId) {
+                    log('main', '验证码处理', '创建验证码请求失败');
+                    return null;
                 }
-            } catch (error) {
-                log('main', '验证码处理', `获取验证码失败: ${error}`, 'warn');
+                return await this.waitForVerificationCodeWithId(newVerificationId);
             }
-
-            // 等待一段时间后重试
-            await new Promise(resolve => setTimeout(resolve, this.config.retry_interval!));
+            
+            return await this.waitForVerificationCodeWithId(verificationId);
+        } catch (error) {
+            log('main', '验证码处理', `等待验证码时出错: ${error}`, 'error');
+            return null;
         }
+    }
 
+    /**
+     * 使用指定ID等待验证码
+     */
+    private async waitForVerificationCodeWithId(verificationId: number): Promise<string | null> {
+        log('main', '验证码处理', `开始等待验证码，ID: ${verificationId}`);
+        
+        // 循环检查验证码状态，最多等待300秒
+        const maxWaitTime = 300 * 1000; // 300秒
+        const checkInterval = 3000; // 每3秒检查一次
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < maxWaitTime) {
+            const result = await this.checkVerificationCode(verificationId);
+            
+            if (result.status === 'completed' && result.code) {
+                log('main', '验证码处理', `成功获取验证码: ${result.code}`);
+                return result.code;
+            } else if (result.status === 'expired') {
+                log('main', '验证码处理', '验证码已过期');
+                return null;
+            }
+            
+            // 计算剩余时间并显示倒计时
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const remaining = Math.max(0, 300 - elapsed);
+            log('main', '验证码处理', `等待验证码输入...${remaining}s`);
+            
+            await new Promise(resolve => setTimeout(resolve, checkInterval));
+        }
+        
         log('main', '验证码处理', '等待验证码超时');
         return null;
     }
 
     /**
-     * 从辅助邮箱获取验证码
-     * 这个方法需要根据具体的邮箱服务商来实现
+     * 获取最新的验证码请求ID
      */
-    private async getCodeFromAuxiliaryEmail(): Promise<string | null> {
-        // TODO: 实现从辅助邮箱获取验证码的逻辑
-        // 这里需要根据不同的邮箱服务商来实现：
-        // 1. Gmail API
-        // 2. Outlook/Hotmail API
-        // 3. QQ邮箱 API
-        // 4. 163邮箱 API
-        // 等等
-
-        // 临时返回null，等待具体实现
-        return null;
+    private async getLatestVerificationId(): Promise<number | null> {
+        return this.currentVerificationId;
     }
+
+
 
     /**
      * 填入验证码
      */
-    private async enterVerificationCode(page: Page, code: string): Promise<void> {
+    private async enterVerificationCode(page: Page, code: string, deviceType: string = 'pc'): Promise<void> {
         try {
+            // 输入验证码前保存快照
+            await this.savePageSnapshot(page, 'before_verification_input', deviceType);
+            
             // 查找验证码输入框
             const codeInput = await page.$('input[type="text"], input[name="otc"], #otc, [data-testid*="otc"]');
             if (!codeInput) {
@@ -458,6 +552,9 @@ export class VerificationCodeHandler {
             // 点击提交按钮
             await page.click('button[type="submit"], button:has-text("验证"), button:has-text("Verify")');
             
+            // 输入验证码后保存快照
+            await this.savePageSnapshot(page, 'after_verification_input', deviceType);
+            
         } catch (error) {
             log('main', '验证码处理', `填入验证码失败: ${error}`, 'error');
             throw error;
@@ -467,14 +564,24 @@ export class VerificationCodeHandler {
     /**
      * 等待验证结果
      */
-    private async waitForVerificationResult(page: Page): Promise<boolean> {
+    private async waitForVerificationResult(page: Page, deviceType: string = 'pc'): Promise<boolean> {
         try {
             // 等待页面跳转或显示成功信息
             await page.waitForTimeout(5000);
 
+            // 验证结果后保存快照
+            await this.savePageSnapshot(page, 'verification_result', deviceType);
+
             // 检查是否验证成功（页面URL变化或显示成功信息）
             const currentUrl = page.url();
-            if (currentUrl.includes('rewards.bing.com') || currentUrl.includes('account.microsoft.com')) {
+            log('main', '验证码处理', `验证后页面URL: ${currentUrl}`);
+            
+            // 检查是否已经登录成功（跳转到rewards页面或其他成功页面）
+            if (currentUrl.includes('rewards.bing.com') || 
+                currentUrl.includes('account.microsoft.com') ||
+                currentUrl.includes('bing.com') ||
+                currentUrl.includes('microsoft.com')) {
+                log('main', '验证码处理', '验证成功：页面已跳转到目标网站');
                 return true;
             }
 
@@ -486,6 +593,13 @@ export class VerificationCodeHandler {
                 return false;
             }
 
+            // 检查是否还在登录页面，如果是则可能验证失败
+            if (currentUrl.includes('login.live.com') || currentUrl.includes('login.microsoftonline.com')) {
+                log('main', '验证码处理', '验证可能失败：仍在登录页面');
+                return false;
+            }
+
+            log('main', '验证码处理', '验证结果：页面状态未知，假设成功');
             return true;
         } catch (error) {
             log('main', '验证码处理', `等待验证结果时出错: ${error}`, 'error');
@@ -509,9 +623,10 @@ export class VerificationCodeHandler {
                 fs.mkdirSync(snapshotDir, { recursive: true });
             }
             
-            // 生成带设备类型和序号的文件名
+            // 根据设备类型设置前缀：桌面端用pc_，移动端用app_
+            const prefix = deviceType === 'mobile' ? 'app_' : 'pc_';
             const timestamp = Date.now();
-            const fileName = `${deviceType}_${snapshotName}_${timestamp}`;
+            const fileName = `${prefix}${snapshotName}_${timestamp}`;
             
             // 保存HTML文件
             const htmlPath = path.join(snapshotDir, `${fileName}.html`);
@@ -524,6 +639,76 @@ export class VerificationCodeHandler {
             log('main', '验证码处理', `页面快照已保存: ${htmlPath}, ${screenshotPath}`);
         } catch (error) {
             log('main', '验证码处理', `保存页面快照失败: ${error}`, 'error');
+        }
+    }
+
+    /**
+     * 请求Service端创建验证码请求
+     */
+    private async requestVerificationCode(): Promise<number | null> {
+        try {
+            const axios = require('axios');
+            const config = require('../config.json');
+            
+            if (!config.apiServer?.enabled || !config.apiServer?.updateUrl || !config.apiServer?.token) {
+                log('main', '验证码处理', 'API配置不完整，无法请求验证码');
+                return null;
+            }
+            
+            const apiUrl = new URL(config.apiServer.updateUrl);
+            apiUrl.pathname = '/web_api/verification/request';
+            
+            const response = await axios.post(apiUrl.toString(), {
+                email: this.config.auxiliary_email
+            }, {
+                headers: {
+                    'Authorization': `Bearer ${config.apiServer.token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (response.data.success) {
+                return response.data.verification_id;
+            } else {
+                log('main', '验证码处理', `创建验证码请求失败: ${response.data.message}`);
+                return null;
+            }
+        } catch (error) {
+            log('main', '验证码处理', `请求验证码失败: ${error}`, 'error');
+            return null;
+        }
+    }
+
+    /**
+     * 检查验证码状态
+     */
+    private async checkVerificationCode(verificationId: number): Promise<{status: string, code?: string}> {
+        try {
+            const axios = require('axios');
+            const config = require('../config.json');
+            
+            const apiUrl = new URL(config.apiServer!.updateUrl);
+            apiUrl.pathname = `/web_api/verification/check/${verificationId}`;
+            
+            const response = await axios.get(apiUrl.toString(), {
+                headers: {
+                    'Authorization': `Bearer ${config.apiServer!.token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (response.data.success) {
+                return {
+                    status: response.data.status,
+                    code: response.data.code
+                };
+            } else {
+                log('main', '验证码处理', `检查验证码状态失败: ${response.data.message}`);
+                return { status: 'error' };
+            }
+        } catch (error) {
+            log('main', '验证码处理', `检查验证码状态失败: ${error}`, 'error');
+            return { status: 'error' };
         }
     }
 }

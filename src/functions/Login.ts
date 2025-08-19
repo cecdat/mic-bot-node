@@ -181,14 +181,36 @@ export class Login {
                 }
             }
 
+            // 检查是否需要处理辅助邮箱验证码（在密码输入之前）
+            const verificationSuccess = await this.handleAuxiliaryEmailVerification(page, email);
+            
+            // 如果验证码处理成功，检查是否已经登录
+            if (verificationSuccess) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 验证码处理成功，检查登录状态...`);
+                
+                // 等待页面跳转
+                await this.bot.utils.wait(3000);
+                
+                // 检查是否已经登录成功
+                const currentUrl = page.url();
+                if (currentUrl.includes('rewards.bing.com') || 
+                    currentUrl.includes('account.microsoft.com') ||
+                    currentUrl.includes('bing.com') ||
+                    currentUrl.includes('microsoft.com')) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 验证码处理后已成功登录，跳过密码输入步骤`);
+                    await this.checkLoggedIn(page, email);
+                    await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '验证码登录成功');
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 通过验证码成功登录到微软账户`);
+                    return;
+                }
+            }
+            
+            // 如果验证码处理失败或未处理，继续正常的密码输入流程
             await this.enterPassword(page, password);
             // 截图：密码输入后页面
             if (this.bot.config.snapshots?.login) {
                 await this.saveSnapshot(page, email, `password_entered_page_${Date.now()}.html`);
             }
-            
-            // 检查是否需要处理辅助邮箱验证码
-            await this.handleAuxiliaryEmailVerification(page, email);
             
             await this.checkLoggedIn(page, email);
             await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '登录成功');
@@ -220,8 +242,17 @@ export class Login {
             if (nextButton) {
                 await nextButton.click();
                 await this.bot.utils.wait(3000);
-                await this.handleVerifyEmailPage(page, email);
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 邮箱输入成功`);
+                try {
+                    await this.handleVerifyEmailPage(page, email);
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 邮箱输入成功`);
+                } catch (error) {
+                    if (error instanceof Error && error.message === 'VERIFICATION_LOGIN_SUCCESS') {
+                        this.bot.log(this.bot.isMobile, '登录', `[${email}] 验证码登录成功，邮箱输入流程完成`);
+                        throw error; // 重新抛出异常，让上层处理
+                    } else {
+                        throw error; // 重新抛出其他异常
+                    }
+                }
             } else {
                 this.bot.log(this.bot.isMobile, '登录', `[${email}] 输入邮箱后未找到“下一步”按钮`, 'warn');
             }
@@ -247,7 +278,12 @@ export class Login {
             }
             const viewFooterElement = await page.waitForSelector('#view > div > span:nth-child(6)', { timeout: 2000 }).catch(() => null)
             const passwordField1 = await page.waitForSelector(passwordInputSelector, { timeout: 5000 }).catch(() => null)
-            if (viewFooterElement && !passwordField1) {
+            
+            // 检查当前页面是否是"验证你的电子邮件"页面，如果是则跳过"获取登录验证码"检测
+            const pageTitle = await page.title();
+            const isEmailVerificationPage = pageTitle.includes('验证你的电子邮件') || pageTitle.includes('Verify your email');
+            
+            if (viewFooterElement && !passwordField1 && !isEmailVerificationPage) {
                 this.bot.log(this.bot.isMobile, '登录', '通过"viewFooter"检测到"获取登录验证码"页面')
     
                 const otherWaysButton = await viewFooterElement.$('span[role="button"]')
@@ -292,20 +328,20 @@ export class Login {
         }
     }
 
-    private async handleAuxiliaryEmailVerification(page: Page, email: string) {
+    private async handleAuxiliaryEmailVerification(page: Page, email: string): Promise<boolean> {
         try {
             // 检查当前账户是否有辅助邮箱配置
             const account = this.bot.account;
             if (!account || !account.auxiliary_email) {
                 this.bot.log(this.bot.isMobile, '登录', `账户 ${email} 未配置辅助邮箱，跳过验证码处理`);
-                return;
+                return false;
             }
 
             // 检查是否在验证码页面
             const isVerificationPage = await this.isVerificationPage(page);
             if (!isVerificationPage) {
                 this.bot.log(this.bot.isMobile, '登录', `当前页面不是验证码页面，跳过验证码处理`);
-                return;
+                return false;
             }
 
             // 创建验证码处理器
@@ -318,14 +354,15 @@ export class Login {
             const success = await verificationHandler.handleAuxiliaryEmailVerification(page, email, deviceType);
             if (success) {
                 this.bot.log(this.bot.isMobile, '登录', `账户 ${email} 辅助邮箱验证码处理成功`);
+                return true;
             } else {
                 this.bot.log(this.bot.isMobile, '登录', `账户 ${email} 辅助邮箱验证码处理失败`, 'error');
-                throw new Error('辅助邮箱验证码处理失败');
+                return false;
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.bot.log(this.bot.isMobile, '登录', `处理辅助邮箱验证码时出错: ${errorMessage}`, 'error');
-            throw error;
+            return false;
         }
     }
 
@@ -338,24 +375,46 @@ export class Login {
                 '#otc',
                 '[data-testid*="otc"]',
                 'button:has-text("发送")',
-                'button:has-text("Send")'
+                'button:has-text("Send")',
+                '#proof-confirmation-email-input'
             ];
 
             for (const selector of verificationSelectors) {
                 const element = await page.$(selector);
                 if (element) {
+                    this.bot.log(this.bot.isMobile, '登录', `通过选择器 "${selector}" 检测到验证页面`);
                     return true;
                 }
             }
 
-            // 检查是否是身份验证选择页面
+            // 检查页面标题和内容
+            const title = await page.title();
             const pageText = await page.textContent('body');
+            
+            this.bot.log(this.bot.isMobile, '登录', `检查验证页面 - 标题: "${title}"`);
+            
+            // 检查是否是身份验证选择页面
             if (pageText && (pageText.includes('验证你的身份') || pageText.includes('发送电子邮件'))) {
+                this.bot.log(this.bot.isMobile, '登录', '通过页面内容检测到身份验证选择页面');
                 return true;
             }
 
+            // 检查是否是"验证你的电子邮件"页面
+            if (title.includes('验证你的电子邮件') || title.includes('Verify your email')) {
+                this.bot.log(this.bot.isMobile, '登录', '通过页面标题检测到验证你的电子邮件页面');
+                return true;
+            }
+
+            // 检查页面内容是否包含"验证你的电子邮件"相关关键词
+            if (pageText && (pageText.includes('验证你的电子邮件') || pageText.includes('发送代码') || pageText.includes('我们将向'))) {
+                this.bot.log(this.bot.isMobile, '登录', '通过页面内容关键词检测到验证页面');
+                return true;
+            }
+
+            this.bot.log(this.bot.isMobile, '登录', '未检测到验证页面');
             return false;
-        } catch {
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '登录', `检查验证页面时出错: ${error}`, 'error');
             return false;
         }
     }
@@ -570,7 +629,29 @@ export class Login {
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到"验证电子邮件"页面`);
             await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.VerificationRequired, '需要邮件验证');
             
-            // 新增：更精确的选择器策略
+            // 检查是否需要处理辅助邮箱验证码
+            const verificationSuccess = await this.handleAuxiliaryEmailVerification(page, email);
+            
+            // 如果验证码处理成功，检查是否已经登录成功
+            if (verificationSuccess) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 验证码处理成功，检查登录状态...`);
+                
+                // 等待页面跳转
+                await this.bot.utils.wait(3000);
+                
+                // 检查是否已经登录成功
+                const currentUrl = page.url();
+                if (currentUrl.includes('rewards.bing.com') || 
+                    currentUrl.includes('account.microsoft.com') ||
+                    currentUrl.includes('bing.com') ||
+                    currentUrl.includes('microsoft.com')) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 验证码处理后已成功登录，跳过"使用密码"步骤`);
+                    // 抛出特殊异常，表示验证码登录成功
+                    throw new Error('VERIFICATION_LOGIN_SUCCESS');
+                }
+            }
+            
+            // 如果验证码处理失败或未处理，继续寻找"使用密码"选项
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 正在寻找"使用密码"选项...`);
             
             // 方法1：使用role="button"选择器（针对HTML快照中看到的元素）
@@ -785,6 +866,11 @@ export class Login {
     private async saveSnapshot(page: Page, email: string, filename: string) {
         // 提取文件名（不含扩展名）
         const baseFilename = filename.replace(/\.html$/, '');
+        
+        // 添加设备类型前缀
+        const deviceType = this.bot.isMobile ? 'app' : 'pc';
+        const prefixedFilename = `${deviceType}_${baseFilename}`;
+        
         this.bot.log(this.bot.isMobile, '调试模式', `[${email}] 正在保存页面快照...`, 'warn');
         try {
             await this.bot.utils.wait(2000);
@@ -795,12 +881,12 @@ export class Login {
 
             // 保存HTML格式（保持原有功能）
             const htmlContent = await page.content();
-            const htmlSnapshotPath = path.join(sessionDir, `${baseFilename}.html`);
+            const htmlSnapshotPath = path.join(sessionDir, `${prefixedFilename}.html`);
             fs.writeFileSync(htmlSnapshotPath, htmlContent);
             this.bot.log(this.bot.isMobile, '调试模式', `HTML快照已成功保存到: ${htmlSnapshotPath}`, 'log', 'green');
 
             // 保存图片格式（新增功能）
-            const imageSnapshotPath = path.join(sessionDir, `${baseFilename}.png`);
+            const imageSnapshotPath = path.join(sessionDir, `${prefixedFilename}.png`);
             await page.screenshot({
                 path: imageSnapshotPath,
                 fullPage: true
