@@ -100,18 +100,46 @@ export class VerificationCodeHandler {
         try {
             // 检查页面标题是否包含"验证你的身份"
             const title = await page.title();
+            log('main', '验证码处理', `页面标题: ${title}`);
+            
             if (title.includes('验证你的身份') || title.includes('Verify your identity')) {
+                log('main', '验证码处理', '通过页面标题检测到身份验证页面');
                 return true;
             }
 
             // 检查页面内容是否包含相关文本
             const pageText = await page.textContent('body');
-            if (pageText && (pageText.includes('验证你的身份') || pageText.includes('发送电子邮件'))) {
+            if (pageText) {
+                const verificationKeywords = [
+                    '验证你的身份',
+                    'Verify your identity',
+                    '发送电子邮件',
+                    'Send email',
+                    'he*****@qq.com',
+                    '@qq.com',
+                    '@gmail.com',
+                    '@outlook.com'
+                ];
+
+                for (const keyword of verificationKeywords) {
+                    if (pageText.includes(keyword)) {
+                        log('main', '验证码处理', `通过关键词 "${keyword}" 检测到身份验证页面`);
+                        return true;
+                    }
+                }
+            }
+
+            // 检查URL是否包含验证相关路径
+            const currentUrl = page.url();
+            if (currentUrl.includes('login.live.com') || currentUrl.includes('account.microsoft.com')) {
+                log('main', '验证码处理', '通过URL检测到可能的身份验证页面');
                 return true;
             }
 
+            log('main', '验证码处理', '未检测到身份验证选择页面');
             return false;
-        } catch {
+        } catch (error) {
+            log('main', '验证码处理', `检查身份验证页面时出错: ${error}`, 'error');
             return false;
         }
     }
@@ -155,44 +183,101 @@ export class VerificationCodeHandler {
      */
     private async findEmailVerificationOption(page: Page): Promise<any> {
         try {
+            // 首先获取页面内容进行调试
+            const pageText = await page.textContent('body');
+            log('main', '验证码处理', `页面内容预览: ${pageText?.substring(0, 500)}...`);
+
             // 方法1：查找包含"发送电子邮件"文本的元素
             const emailOption = await page.$('text="发送电子邮件", text="Send email"');
             if (emailOption) {
+                log('main', '验证码处理', '找到方法1的发送电子邮件选项');
                 return emailOption;
             }
 
-            // 方法2：查找包含邮箱地址的元素
-            const emailWithAddress = await page.$('text=/向.*@.*发送电子邮件/');
+            // 方法2：查找包含邮箱地址的元素（更宽松的匹配）
+            const emailWithAddress = await page.$('text=/向.*@.*发送电子邮件/, text=/Send email to.*@.*/');
             if (emailWithAddress) {
+                log('main', '验证码处理', '找到方法2的发送电子邮件选项');
                 return emailWithAddress;
             }
 
-            // 方法3：查找包含信封图标的元素
-            const envelopeIcon = await page.$('[data-testid*="email"], [aria-label*="email"], .email-icon');
+            // 方法3：查找包含"@qq.com"等邮箱域名的元素
+            const emailDomainOption = await page.$('text=/@qq\.com/, text=/@gmail\.com/, text=/@outlook\.com/, text=/@163\.com/');
+            if (emailDomainOption) {
+                log('main', '验证码处理', '找到方法3的邮箱域名选项');
+                return emailDomainOption;
+            }
+
+            // 方法4：查找包含信封图标的元素
+            const envelopeIcon = await page.$('[data-testid*="email"], [aria-label*="email"], .email-icon, [class*="email"], [class*="mail"]');
             if (envelopeIcon) {
+                log('main', '验证码处理', '找到方法4的信封图标选项');
                 return envelopeIcon;
             }
 
-            // 方法4：使用JavaScript查找
+            // 方法5：查找可点击的按钮或链接
+            const clickableElements = await page.$$('button, a, [role="button"], [tabindex]');
+            for (const element of clickableElements) {
+                const text = await element.textContent();
+                if (text && (text.includes('@') || text.includes('邮件') || text.includes('email'))) {
+                    log('main', '验证码处理', `找到方法5的可点击元素: ${text}`);
+                    return element;
+                }
+            }
+
+            // 方法6：使用JavaScript查找所有包含邮箱相关文本的元素
             const jsResult = await page.evaluate(() => {
                 const elements = Array.from(document.querySelectorAll('*')).filter(el => {
                     const text = el.textContent || '';
-                    return text.includes('发送电子邮件') || text.includes('Send email') || text.includes('@');
+                    return text.includes('发送电子邮件') || 
+                           text.includes('Send email') || 
+                           text.includes('@') ||
+                           text.includes('邮件') ||
+                           text.includes('email');
                 });
                 
-                for (const el of elements) {
+                const visibleElements = elements.filter(el => {
                     const htmlEl = el as HTMLElement;
-                    if (htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0) {
-                        return { found: true, tagName: htmlEl.tagName };
-                    }
+                    return htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0;
+                });
+
+                if (visibleElements.length > 0) {
+                    const firstElement = visibleElements[0] as HTMLElement;
+                    return { 
+                        found: true, 
+                        tagName: firstElement.tagName,
+                        text: firstElement.textContent?.substring(0, 100),
+                        className: firstElement.className
+                    };
                 }
                 return { found: false };
             });
 
             if (jsResult.found) {
-                return await page.$(`${jsResult.tagName}:has-text("发送电子邮件"), ${jsResult.tagName}:has-text("Send email")`);
+                log('main', '验证码处理', `JavaScript找到元素: ${jsResult.tagName}, 文本: ${jsResult.text}, 类名: ${jsResult.className}`);
+                // 尝试多种选择器
+                const selectors = [
+                    `${jsResult.tagName}:has-text("发送电子邮件")`,
+                    `${jsResult.tagName}:has-text("Send email")`,
+                    `${jsResult.tagName}:has-text("@")`,
+                    `${jsResult.tagName}.${jsResult.className.split(' ')[0]}`,
+                    jsResult.tagName
+                ];
+
+                for (const selector of selectors) {
+                    try {
+                        const element = await page.$(selector);
+                        if (element) {
+                            log('main', '验证码处理', `使用选择器 ${selector} 找到元素`);
+                            return element;
+                        }
+                    } catch (e) {
+                        // 忽略选择器错误，继续尝试下一个
+                    }
+                }
             }
 
+            log('main', '验证码处理', '所有方法都未找到发送电子邮件选项');
             return null;
         } catch (error) {
             log('main', '验证码处理', `查找发送电子邮件选项失败: ${error}`, 'error');
