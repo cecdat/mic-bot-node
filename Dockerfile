@@ -37,7 +37,7 @@ COPY get_all_hots.py .
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip3 install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN pip3 install --no-cache-dir -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple/
 
 # The command that will be run when the container starts
 CMD ["node", "dist/index.js"]
