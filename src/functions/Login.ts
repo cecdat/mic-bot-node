@@ -248,7 +248,7 @@ export class Login {
                 } catch (error) {
                     if (error instanceof Error && error.message === 'VERIFICATION_LOGIN_SUCCESS') {
                         this.bot.log(this.bot.isMobile, '登录', `[${email}] 验证码登录成功，邮箱输入流程完成`);
-                        throw error; // 重新抛出异常，让上层处理
+                        return; // 直接返回，不抛出异常
                     } else {
                         throw error; // 重新抛出其他异常
                     }

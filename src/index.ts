@@ -370,8 +370,14 @@ export class MicrosoftRewardsBot {
             
             // 先执行桌面端任务，在登录成功后获取初始积分
             const desktopResult = await this.Desktop(browser, account, initialPointsToday).catch(e => { 
-                log(false, 'Desktop-Error', e.message, 'error'); 
-                return {points: 0, gain: 0, initialPoints: 0}
+                if (e.message === 'VERIFICATION_LOGIN_SUCCESS') {
+                    log(false, 'Desktop-Info', '验证码登录成功，继续执行任务');
+                    // 验证码登录成功，继续执行任务
+                    return {points: 0, gain: 0, initialPoints: 0}
+                } else {
+                    log(false, 'Desktop-Error', e.message, 'error'); 
+                    return {points: 0, gain: 0, initialPoints: 0}
+                }
             });
             
             // 添加停止检查
@@ -382,8 +388,14 @@ export class MicrosoftRewardsBot {
             
             // 执行移动端任务，使用桌面端完成后的积分作为初始值
             const mobileResult = await this.Mobile(browser, account, desktopResult.points).catch(e => { 
-                log(true, 'Mobile-Error', e.message, 'error'); 
-                return {points: desktopResult.points, gain: 0}
+                if (e.message === 'VERIFICATION_LOGIN_SUCCESS') {
+                    log(true, 'Mobile-Info', '验证码登录成功，继续执行任务');
+                    // 验证码登录成功，继续执行任务
+                    return {points: desktopResult.points, gain: 0}
+                } else {
+                    log(true, 'Mobile-Error', e.message, 'error'); 
+                    return {points: desktopResult.points, gain: 0}
+                }
             });
             
             // 添加停止检查
