@@ -160,6 +160,12 @@ export class VerificationCodeHandler {
                 // 等待页面跳转到辅助邮箱输入页面
                 await page.waitForTimeout(3000);
                 
+                // 保存点击后的页面快照
+                const timestamp = Date.now();
+                const snapshotName = `verification_after_click_${timestamp}`;
+                await this.savePageSnapshot(page, snapshotName);
+                log('main', '验证码处理', `已保存点击后页面快照: ${snapshotName}`);
+                
                 // 检查是否跳转到辅助邮箱输入页面
                 const isAuxiliaryEmailPage = await this.isAuxiliaryEmailInputPage(page);
                 if (isAuxiliaryEmailPage) {
@@ -167,6 +173,10 @@ export class VerificationCodeHandler {
                     await this.handleAuxiliaryEmailInputPage(page);
                 } else {
                     log('main', '验证码处理', '未跳转到辅助邮箱输入页面，尝试其他方法', 'warn');
+                    // 保存当前页面状态用于调试
+                    const debugSnapshotName = `verification_debug_${timestamp}`;
+                    await this.savePageSnapshot(page, debugSnapshotName);
+                    log('main', '验证码处理', `已保存调试页面快照: ${debugSnapshotName}`);
                 }
             } else {
                 log('main', '验证码处理', '未找到发送电子邮件选项', 'error');
@@ -458,6 +468,36 @@ export class VerificationCodeHandler {
         } catch (error) {
             log('main', '验证码处理', `等待验证结果时出错: ${error}`, 'error');
             return false;
+        }
+    }
+
+    /**
+     * 保存页面快照
+     */
+    private async savePageSnapshot(page: Page, snapshotName: string): Promise<void> {
+        try {
+            // 保存HTML快照
+            const htmlContent = await page.content();
+            const fs = require('fs');
+            const path = require('path');
+            
+            // 创建快照目录
+            const snapshotDir = path.join('/app/sessions', 'verification_snapshots');
+            if (!fs.existsSync(snapshotDir)) {
+                fs.mkdirSync(snapshotDir, { recursive: true });
+            }
+            
+            // 保存HTML文件
+            const htmlPath = path.join(snapshotDir, `${snapshotName}.html`);
+            fs.writeFileSync(htmlPath, htmlContent);
+            
+            // 保存截图
+            const screenshotPath = path.join(snapshotDir, `${snapshotName}.png`);
+            await page.screenshot({ path: screenshotPath, fullPage: true });
+            
+            log('main', '验证码处理', `页面快照已保存: ${htmlPath}, ${screenshotPath}`);
+        } catch (error) {
+            log('main', '验证码处理', `保存页面快照失败: ${error}`, 'error');
         }
     }
 }
