@@ -6,6 +6,7 @@ import path from 'path'
 import { MicrosoftRewardsBot } from '../index'
 import { saveSessionData } from '../util/Load'
 import { OAuth } from '../interface/OAuth'
+import { VerificationCodeHandler } from '../util/VerificationCodeHandler'
 
 export const LoginStatusCode = {
     Success: 0,
@@ -185,6 +186,10 @@ export class Login {
             if (this.bot.config.snapshots?.login) {
                 await this.saveSnapshot(page, email, `password_entered_page_${Date.now()}.html`);
             }
+            
+            // 检查是否需要处理辅助邮箱验证码
+            await this.handleAuxiliaryEmailVerification(page, email);
+            
             await this.checkLoggedIn(page, email);
             await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '登录成功');
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功登录到微软账户`);
@@ -284,6 +289,67 @@ export class Login {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.bot.log(this.bot.isMobile, '登录', `密码输入失败: ${errorMessage}`, 'error');
             await this.handle2FA(page);
+        }
+    }
+
+    private async handleAuxiliaryEmailVerification(page: Page, email: string) {
+        try {
+            // 检查当前账户是否有辅助邮箱配置
+            const account = this.bot.account;
+            if (!account || !account.auxiliary_email) {
+                this.bot.log(this.bot.isMobile, '登录', `账户 ${email} 未配置辅助邮箱，跳过验证码处理`);
+                return;
+            }
+
+            // 检查是否在验证码页面
+            const isVerificationPage = await this.isVerificationPage(page);
+            if (!isVerificationPage) {
+                this.bot.log(this.bot.isMobile, '登录', `当前页面不是验证码页面，跳过验证码处理`);
+                return;
+            }
+
+            // 创建验证码处理器
+            const verificationHandler = new VerificationCodeHandler({
+                auxiliary_email: account.auxiliary_email
+            });
+
+            // 处理验证码
+            const success = await verificationHandler.handleAuxiliaryEmailVerification(page, email);
+            if (success) {
+                this.bot.log(this.bot.isMobile, '登录', `账户 ${email} 辅助邮箱验证码处理成功`);
+            } else {
+                this.bot.log(this.bot.isMobile, '登录', `账户 ${email} 辅助邮箱验证码处理失败`, 'error');
+                throw new Error('辅助邮箱验证码处理失败');
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '登录', `处理辅助邮箱验证码时出错: ${errorMessage}`, 'error');
+            throw error;
+        }
+    }
+
+    private async isVerificationPage(page: Page): Promise<boolean> {
+        try {
+            // 检查页面是否包含验证码相关的元素
+            const verificationSelectors = [
+                'input[type="text"]',
+                'input[name="otc"]',
+                '#otc',
+                '[data-testid*="otc"]',
+                'button:has-text("发送")',
+                'button:has-text("Send")'
+            ];
+
+            for (const selector of verificationSelectors) {
+                const element = await page.$(selector);
+                if (element) {
+                    return true;
+                }
+            }
+
+            return false;
+        } catch {
+            return false;
         }
     }
 
