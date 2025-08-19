@@ -74,6 +74,14 @@ export class VerificationCodeHandler {
      */
     private async waitForVerificationPage(page: Page): Promise<void> {
         try {
+            // 首先检查是否在身份验证选择页面
+            const isIdentityVerificationPage = await this.isIdentityVerificationPage(page);
+            if (isIdentityVerificationPage) {
+                log('main', '验证码处理', '检测到身份验证选择页面，准备发送验证码');
+                await this.handleIdentityVerificationPage(page);
+                return;
+            }
+
             // 等待页面包含验证相关的元素
             await page.waitForSelector('input[type="text"], input[name="otc"], #otc, [data-testid*="otc"]', {
                 timeout: 10000
@@ -82,6 +90,160 @@ export class VerificationCodeHandler {
         } catch (error) {
             log('main', '验证码处理', '等待验证码页面超时，可能不需要验证码', 'warn');
             throw new Error('验证码页面未找到');
+        }
+    }
+
+    /**
+     * 检查是否在身份验证选择页面
+     */
+    private async isIdentityVerificationPage(page: Page): Promise<boolean> {
+        try {
+            // 检查页面标题是否包含"验证你的身份"
+            const title = await page.title();
+            if (title.includes('验证你的身份') || title.includes('Verify your identity')) {
+                return true;
+            }
+
+            // 检查页面内容是否包含相关文本
+            const pageText = await page.textContent('body');
+            if (pageText && (pageText.includes('验证你的身份') || pageText.includes('发送电子邮件'))) {
+                return true;
+            }
+
+            return false;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * 处理身份验证选择页面
+     */
+    private async handleIdentityVerificationPage(page: Page): Promise<void> {
+        try {
+            log('main', '验证码处理', '正在处理身份验证选择页面');
+
+            // 查找并点击"发送电子邮件"选项
+            const emailOption = await this.findEmailVerificationOption(page);
+            if (emailOption) {
+                await emailOption.click();
+                log('main', '验证码处理', '已点击发送电子邮件选项');
+                
+                // 等待页面跳转到辅助邮箱输入页面
+                await page.waitForTimeout(3000);
+                
+                // 检查是否跳转到辅助邮箱输入页面
+                const isAuxiliaryEmailPage = await this.isAuxiliaryEmailInputPage(page);
+                if (isAuxiliaryEmailPage) {
+                    log('main', '验证码处理', '已跳转到辅助邮箱输入页面');
+                    await this.handleAuxiliaryEmailInputPage(page);
+                } else {
+                    log('main', '验证码处理', '未跳转到辅助邮箱输入页面，尝试其他方法', 'warn');
+                }
+            } else {
+                log('main', '验证码处理', '未找到发送电子邮件选项', 'error');
+                throw new Error('未找到发送电子邮件选项');
+            }
+        } catch (error) {
+            log('main', '验证码处理', `处理身份验证选择页面失败: ${error}`, 'error');
+            throw error;
+        }
+    }
+
+    /**
+     * 查找发送电子邮件选项
+     */
+    private async findEmailVerificationOption(page: Page): Promise<any> {
+        try {
+            // 方法1：查找包含"发送电子邮件"文本的元素
+            const emailOption = await page.$('text="发送电子邮件", text="Send email"');
+            if (emailOption) {
+                return emailOption;
+            }
+
+            // 方法2：查找包含邮箱地址的元素
+            const emailWithAddress = await page.$('text=/向.*@.*发送电子邮件/');
+            if (emailWithAddress) {
+                return emailWithAddress;
+            }
+
+            // 方法3：查找包含信封图标的元素
+            const envelopeIcon = await page.$('[data-testid*="email"], [aria-label*="email"], .email-icon');
+            if (envelopeIcon) {
+                return envelopeIcon;
+            }
+
+            // 方法4：使用JavaScript查找
+            const jsResult = await page.evaluate(() => {
+                const elements = Array.from(document.querySelectorAll('*')).filter(el => {
+                    const text = el.textContent || '';
+                    return text.includes('发送电子邮件') || text.includes('Send email') || text.includes('@');
+                });
+                
+                for (const el of elements) {
+                    const htmlEl = el as HTMLElement;
+                    if (htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0 && htmlEl.click) {
+                        return { found: true, tagName: htmlEl.tagName };
+                    }
+                }
+                return { found: false };
+            });
+
+            if (jsResult.found) {
+                return await page.$(`${jsResult.tagName}:has-text("发送电子邮件"), ${jsResult.tagName}:has-text("Send email")`);
+            }
+
+            return null;
+        } catch (error) {
+            log('main', '验证码处理', `查找发送电子邮件选项失败: ${error}`, 'error');
+            return null;
+        }
+    }
+
+    /**
+     * 检查是否在辅助邮箱输入页面
+     */
+    private async isAuxiliaryEmailInputPage(page: Page): Promise<boolean> {
+        try {
+            // 检查页面是否包含邮箱输入框
+            const emailInput = await page.$('input[type="email"], input[name="email"]');
+            return !!emailInput;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * 处理辅助邮箱输入页面
+     */
+    private async handleAuxiliaryEmailInputPage(page: Page): Promise<void> {
+        try {
+            log('main', '验证码处理', '正在处理辅助邮箱输入页面');
+
+            // 查找邮箱输入框
+            const emailInput = await page.$('input[type="email"], input[name="email"]');
+            if (!emailInput) {
+                throw new Error('未找到邮箱输入框');
+            }
+
+            // 填入辅助邮箱
+            await emailInput.fill(this.config.auxiliary_email!);
+            log('main', '验证码处理', `已填入辅助邮箱: ${this.config.auxiliary_email}`);
+
+            // 查找并点击发送按钮
+            const sendButton = await page.$('button[type="submit"], button:has-text("发送"), button:has-text("Send")');
+            if (sendButton) {
+                await sendButton.click();
+                log('main', '验证码处理', '已点击发送按钮');
+                
+                // 等待发送确认
+                await page.waitForTimeout(3000);
+            } else {
+                log('main', '验证码处理', '未找到发送按钮', 'warn');
+            }
+        } catch (error) {
+            log('main', '验证码处理', `处理辅助邮箱输入页面失败: ${error}`, 'error');
+            throw error;
         }
     }
 

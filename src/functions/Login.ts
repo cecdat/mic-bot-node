@@ -347,6 +347,12 @@ export class Login {
                 }
             }
 
+            // 检查是否是身份验证选择页面
+            const pageText = await page.textContent('body');
+            if (pageText && (pageText.includes('验证你的身份') || pageText.includes('发送电子邮件'))) {
+                return true;
+            }
+
             return false;
         } catch {
             return false;
