@@ -39,27 +39,124 @@ export class Login {
         }
     }
 
+    private async checkSessionValidity(page: Page, email: string): Promise<boolean> {
+        try {
+            // 检查是否有保存的cookies
+            const cookies = await page.context().cookies();
+            if (cookies.length === 0) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 无保存的cookies，需要重新登录`);
+                return false;
+            }
+
+            // 检查是否有关键的Microsoft cookies
+            const hasMicrosoftCookies = cookies.some((cookie: any) => 
+                cookie.name.includes('WLSSC') || 
+                cookie.name.includes('RPSSecAuth') || 
+                cookie.name.includes('MUID') ||
+                cookie.name.includes('_EDGE_S')
+            );
+
+            if (!hasMicrosoftCookies) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 缺少关键Microsoft cookies，需要重新登录`);
+                return false;
+            }
+
+            // 尝试访问rewards页面检查会话是否有效
+            await this.gotoWithRetry(page, 'https://rewards.bing.com/');
+            await page.waitForLoadState('domcontentloaded').catch(() => {});
+            
+            // 检查是否直接跳转到登录页面
+            const currentUrl = page.url();
+            if (currentUrl.includes('login.live.com') || currentUrl.includes('signin.live.com')) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 会话已过期，重定向到登录页面`);
+                return false;
+            }
+
+            // 检查是否在rewards页面且已登录
+            const isLoggedIn = await this.checkLoggedInStatus(page, email);
+            if (isLoggedIn) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 本地会话有效`);
+                return true;
+            }
+
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 会话无效，需要重新登录`);
+            return false;
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检查会话有效性时出错: ${error}`, 'warn');
+            return false;
+        }
+    }
+
+    private async checkLoggedInStatus(page: Page, email: string): Promise<boolean> {
+        try {
+            // 检查当前URL
+            const currentUrl = page.url();
+            const title = await page.title();
+            
+            // 如果已经在rewards.bing.com且标题包含Microsoft Rewards，说明已登录
+            if (currentUrl.includes('rewards.bing.com') && title.includes('Microsoft Rewards')) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到已在Microsoft Rewards页面，已登录`);
+                return true;
+            }
+
+            // 检查是否有登录状态的DOM元素
+            const isLoggedIn = await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 5000 }).then(() => true).catch(() => false);
+            if (isLoggedIn) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到RewardsPortal元素，已登录`);
+                return true;
+            }
+
+            // 检查是否有用户头像或登录状态指示器
+            const hasUserAvatar = await page.waitForSelector('[data-testid="user-avatar"], .user-avatar, [aria-label*="账户"]', { timeout: 3000 }).then(() => true).catch(() => false);
+            if (hasUserAvatar) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到用户头像，已登录`);
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检查登录状态时出错: ${error}`, 'warn');
+            return false;
+        }
+    }
+
     async login(page: Page, email: string, password: string) {
         const platformType = this.bot.isMobile ? 'mobile' : 'pc';
         try {
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 开始登录流程！`);
+            
+            // 第一步：检查本地会话是否有效
+            const sessionValid = await this.checkSessionValidity(page, email);
+            if (sessionValid) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 本地会话有效，跳过登录流程`);
+                await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '会话有效');
+                await this.checkAccountLocked(page, email);
+                await saveSessionData(this.bot.config.sessionPath, page.context(), email, this.bot.isMobile);
+                return;
+            }
+            
+            // 第二步：执行登录流程
             await this.gotoWithRetry(page, 'https://rewards.bing.com/signin');
             await page.waitForLoadState('domcontentloaded').catch(() => { });
+            
             // 截图：初始登录页面（受 snapshots.login 开关控制）
             if (this.bot.config.snapshots?.login) {
                 await this.saveSnapshot(page, email, `initial_login_page_${Date.now()}.html`);
             }
+            
             await this.bot.browser.utils.reloadBadPage(page);
             await this.checkAccountLocked(page, email);
-            const isLoggedIn = await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 10000 }).then(() => true).catch(() => false);
-
+            
+            // 第三步：检查是否已经登录
+            const isLoggedIn = await this.checkLoggedInStatus(page, email);
             if (isLoggedIn) {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 会话有效，已经处于登录状态`);
-                await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '会话有效');
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到已登录状态，跳过登录流程`);
+                await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '已登录');
                 await this.checkAccountLocked(page, email);
             } else {
                 await this.execLogin(page, email, password);
             }
+            
             await saveSessionData(this.bot.config.sessionPath, page.context(), email, this.bot.isMobile);
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 登录流程成功，并已保存登录会话！`);
         } catch (error) {
@@ -78,6 +175,14 @@ export class Login {
     private async execLogin(page: Page, email: string, password: string) {
         const platformType = this.bot.isMobile ? 'mobile' : 'pc';
         try {
+            // 首先检查是否已经登录
+            const isAlreadyLoggedIn = await this.checkLoggedInStatus(page, email);
+            if (isAlreadyLoggedIn) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到已登录状态，跳过登录流程`);
+                await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '已登录');
+                return;
+            }
+
             await this.enterEmail(page, email);
             // 截图：邮箱输入后页面
             if (this.bot.config.snapshots?.login) {
@@ -86,6 +191,14 @@ export class Login {
             await this.bot.utils.wait(3000);
             await this.bot.browser.utils.reloadBadPage(page);
             await this.bot.utils.wait(2000);
+
+            // 再次检查是否已经登录（邮箱输入后可能直接登录）
+            const isLoggedInAfterEmail = await this.checkLoggedInStatus(page, email);
+            if (isLoggedInAfterEmail) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 邮箱输入后检测到已登录状态，跳过密码输入`);
+                await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '已登录');
+                return;
+            }
 
             // [新增] 首先检查是否已经直接跳转到密码输入页面
             this.bot.log(this.bot.isMobile, '登录', '检查是否已直接跳转到密码输入页面...');
@@ -266,6 +379,14 @@ export class Login {
         const passwordInputSelector = 'input[type="password"]'
         const skip2FASelector = '#idA_PWD_SwitchToPassword'; 
         try {
+            // 首先检查是否已经登录
+            const currentUrl = page.url();
+            const title = await page.title();
+            if (currentUrl.includes('rewards.bing.com') && title.includes('Microsoft Rewards')) {
+                this.bot.log(this.bot.isMobile, '登录', '检测到已在Microsoft Rewards页面，跳过密码输入');
+                return;
+            }
+
             const viewFooter = await page.waitForSelector('[data-testid="viewFooter"]', { timeout: 2000 }).catch(() => null)
             if (viewFooter) {
             const skip2FAButton = await page.waitForSelector(skip2FASelector, { timeout: 2000 }).catch(() => null)
@@ -337,6 +458,13 @@ export class Login {
                 return false;
             }
 
+            // 检查是否已经登录
+            const isLoggedIn = await this.checkLoggedInStatus(page, email);
+            if (isLoggedIn) {
+                this.bot.log(this.bot.isMobile, '登录', `账户 ${email} 已登录，跳过验证码处理`);
+                return false;
+            }
+
             // 检查是否在验证码页面
             const isVerificationPage = await this.isVerificationPage(page);
             if (!isVerificationPage) {
@@ -346,7 +474,8 @@ export class Login {
 
             // 创建验证码处理器
             const verificationHandler = new VerificationCodeHandler({
-                auxiliary_email: account.auxiliary_email
+                auxiliary_email: account.auxiliary_email,
+                main_account_email: email  // 传递主账户邮箱
             });
 
             // 处理验证码
@@ -377,6 +506,13 @@ export class Login {
             // 如果已经在rewards.bing.com或Microsoft Rewards页面，说明已经登录成功
             if (currentUrl.includes('rewards.bing.com') || title.includes('Microsoft Rewards')) {
                 this.bot.log(this.bot.isMobile, '登录', '检测到已在Microsoft Rewards页面，非验证页面');
+                return false;
+            }
+            
+            // 检查是否已经登录（通过DOM元素）
+            const isLoggedIn = await this.checkLoggedInStatus(page, '');
+            if (isLoggedIn) {
+                this.bot.log(this.bot.isMobile, '登录', '检测到已登录状态，非验证页面');
                 return false;
             }
             

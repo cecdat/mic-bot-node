@@ -3,6 +3,7 @@ import { log } from './Logger';
 
 export interface VerificationCodeConfig {
     auxiliary_email?: string;
+    main_account_email?: string;  // 主账户邮箱
     max_retries?: number;
     retry_interval?: number;
     timeout?: number;
@@ -42,7 +43,7 @@ export class VerificationCodeHandler {
 
             // 检查是否需要发送验证码
             if (await this.needsToSendCode(page)) {
-                await this.sendVerificationCode(page);
+                await this.sendVerificationCode(page, accountEmail);
             }
 
             // 等待并获取验证码
@@ -437,7 +438,7 @@ export class VerificationCodeHandler {
     /**
      * 发送验证码
      */
-    private async sendVerificationCode(page: Page): Promise<void> {
+    private async sendVerificationCode(page: Page, mainAccountEmail: string): Promise<void> {
         try {
             // 点击发送验证码按钮
             await page.click('button[data-testid*="send"], button:has-text("发送"), button:has-text("Send")');
@@ -447,7 +448,7 @@ export class VerificationCodeHandler {
             await page.waitForTimeout(2000);
             
             // 调用Service端创建验证码请求
-            const verificationId = await this.requestVerificationCode();
+            const verificationId = await this.requestVerificationCode(mainAccountEmail);
             if (verificationId) {
                 log('main', '验证码处理', `验证码请求已创建，ID: ${verificationId}`);
                 // 存储验证码ID供后续使用
@@ -472,7 +473,11 @@ export class VerificationCodeHandler {
             const verificationId = await this.getLatestVerificationId();
             if (!verificationId) {
                 log('main', '验证码处理', '未找到验证码请求，尝试创建新的请求');
-                const newVerificationId = await this.requestVerificationCode();
+                if (!this.config.main_account_email) {
+                    log('main', '验证码处理', '未配置主账户邮箱，无法创建验证码请求');
+                    return null;
+                }
+                const newVerificationId = await this.requestVerificationCode(this.config.main_account_email);
                 if (!newVerificationId) {
                     log('main', '验证码处理', '创建验证码请求失败');
                     return null;
@@ -645,7 +650,7 @@ export class VerificationCodeHandler {
     /**
      * 请求Service端创建验证码请求
      */
-    private async requestVerificationCode(): Promise<number | null> {
+    private async requestVerificationCode(mainAccountEmail: string): Promise<number | null> {
         try {
             const axios = require('axios');
             const config = require('../config.json');
@@ -659,7 +664,8 @@ export class VerificationCodeHandler {
             apiUrl.pathname = '/web_api/verification/request';
             
             const response = await axios.post(apiUrl.toString(), {
-                email: this.config.auxiliary_email
+                main_account_email: mainAccountEmail,  // 主账户邮箱（正在执行登录的账户）
+                auxiliary_email: this.config.auxiliary_email  // 辅助邮箱（用于接收验证码）
             }, {
                 headers: {
                     'Authorization': `Bearer ${config.apiServer.token}`,

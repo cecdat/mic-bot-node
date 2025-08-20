@@ -1,5 +1,0 @@
-[33m068b24f[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m 修复登陆2FA
-[33m1f026db[m Merge branch 'main' of https://github.com/cecdat/mic-bot-node
-[33m804d1db[m 更新代码
-[33m537c486[m 修复积分问题
-[33mf47fbe8[m fix: 修复searchSettings未定义导致的useGeoLocaleQueries错误\n\n- 添加默认searchSettings配置，确保即使service端配置获取失败也有默认值\n- 修复DailyCheckIn和ReadToEarn模块中的配置访问错误\n- 确保所有使用searchSettings的模块都能正常工作
