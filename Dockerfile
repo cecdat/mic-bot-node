@@ -39,5 +39,12 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple/
 
+# 复制启动脚本
+COPY start.sh /app/start.sh
+COPY start.bat /app/start.bat
+
+# 设置执行权限
+RUN chmod +x /app/start.sh
+
 # The command that will be run when the container starts
 CMD ["node", "dist/index.js"]

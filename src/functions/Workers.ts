@@ -86,6 +86,54 @@ export class Workers {
     }
 
     /**
+     * 检查任务是否完成
+     */
+    private async checkTaskCompletion(currentPage: Page, task: UnifiedTask): Promise<boolean> {
+        try {
+            const pageContent = await currentPage.content();
+            const currentUrl = currentPage.url();
+            
+            // 检查URL是否包含rewards相关
+            if (currentUrl.includes('rewards.bing.com') || currentUrl.includes('bing.com/rewards')) {
+                return true;
+            }
+            
+            // 检查页面内容是否包含完成提示
+            const completionIndicators = [
+                'completed', '完成', 'earned', '获得', 'points added', '积分已添加',
+                'task completed', '任务完成', 'successfully', '成功'
+            ];
+            
+            for (const indicator of completionIndicators) {
+                if (pageContent.toLowerCase().includes(indicator.toLowerCase())) {
+                    return true;
+                }
+            }
+            
+            // 检查是否有完成按钮或状态
+            const completionSelectors = [
+                '.completed', '.task-completed', '.reward-earned', '.points-added',
+                '[data-status="completed"]', '[data-completed="true"]'
+            ];
+            
+            for (const selector of completionSelectors) {
+                try {
+                    const element = currentPage.locator(selector);
+                    if (await element.count() > 0 && await element.first().isVisible()) {
+                        return true;
+                    }
+                } catch (error) {
+                    // 忽略选择器错误
+                }
+            }
+            
+            return false;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
      * 执行URL奖励任务
      */
     private async executeUrlRewardTask(currentPage: Page, task: UnifiedTask) {
@@ -105,55 +153,112 @@ export class Workers {
 
             // 等待页面基本加载
             await this.bot.utils.wait(2000);
+            
+            // 保存页面快照用于调试
+            if (this.bot.config.snapshots?.taskExecution) {
+                try {
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    const filename = `url_reward_${this.bot.isMobile ? 'mobile' : 'pc'}_${timestamp}.png`;
+                    await currentPage.screenshot({ 
+                        path: `sessions/snapshots/${filename}`,
+                        fullPage: true 
+                    });
+                    this.bot.log(this.bot.isMobile, 'URL奖励', `保存页面快照: ${filename}`);
+                } catch (error) {
+                    // 忽略快照保存错误
+                }
+            }
 
             // 检查是否已经完成（URL包含rewards相关）
             const currentUrl = currentPage.url();
             if (currentUrl.includes('rewards.bing.com') || currentUrl.includes('bing.com/rewards')) {
-                this.bot.log(this.bot.isMobile, 'URL奖励', '成功完成URL奖励');
+                this.bot.log(this.bot.isMobile, 'URL奖励', '检测到rewards页面，任务可能已完成');
                 return;
             }
 
-            // 尝试查找并点击奖励链接
-            const rewardSelectors = [
-                'a[href*="rewards"]',
-                'a[href*="bing.com/rewards"]',
-                'a[href*="rewards.bing.com"]',
-                '.pointLink',
-                '[data-bi-id*="Rewards"]',
-                '.offer-cta',
-                '.activity-link',
-                'a[href*="bing.com/spotlight"]',
-                'a[href*="bing.com/search"]'
-            ];
-
+            // 尝试多次查找奖励元素，给页面更多时间加载
             let clicked = false;
-            for (const selector of rewardSelectors) {
-                try {
-                    const elements = currentPage.locator(selector);
-                    const count = await elements.count();
-                    
-                    for (let i = 0; i < count; i++) {
-                        const element = elements.nth(i);
-                        if (await element.isVisible({ timeout: 1000 })) {
-                            await element.click();
-                            this.bot.log(this.bot.isMobile, 'URL奖励', `点击了奖励元素: ${selector}`);
-                            clicked = true;
-                            await this.bot.utils.wait(1000);
-                            break;
+            const maxAttempts = 3;
+            
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                if (attempt > 1) {
+                    this.bot.log(this.bot.isMobile, 'URL奖励', `第${attempt}次尝试查找奖励元素...`);
+                    await this.bot.utils.wait(2000); // 等待更长时间
+                }
+
+                // 尝试查找并点击奖励链接
+                const rewardSelectors = [
+                    'a[href*="rewards"]',
+                    'a[href*="bing.com/rewards"]',
+                    'a[href*="rewards.bing.com"]',
+                    '.pointLink',
+                    '[data-bi-id*="Rewards"]',
+                    '.offer-cta',
+                    '.activity-link',
+                    'a[href*="bing.com/spotlight"]',
+                    'a[href*="bing.com/search"]',
+                    'button[onclick*="rewards"]',
+                    '.rewards-link',
+                    '[data-bi-name*="Rewards"]',
+                    'a[href*="microsoft.com/rewards"]',
+                    'a[href*="bing.com/spotlight"]',
+                    'a[href*="bing.com/news"]',
+                    'a[href*="bing.com/videos"]',
+                    'a[href*="bing.com/images"]',
+                    '.activity-button',
+                    '.reward-button',
+                    '[data-bi-name*="reward"]',
+                    '[data-bi-name*="activity"]'
+                ];
+
+                for (const selector of rewardSelectors) {
+                    try {
+                        const elements = currentPage.locator(selector);
+                        const count = await elements.count();
+                        
+                        for (let i = 0; i < count; i++) {
+                            const element = elements.nth(i);
+                            if (await element.isVisible({ timeout: 1000 })) {
+                                await element.click();
+                                this.bot.log(this.bot.isMobile, 'URL奖励', `点击了奖励元素: ${selector}`);
+                                clicked = true;
+                                await this.bot.utils.wait(1000);
+                                break;
+                            }
                         }
+                        
+                        if (clicked) break;
+                    } catch (error) {
+                        // 继续尝试下一个选择器
                     }
-                    
-                    if (clicked) break;
-                } catch (error) {
-                    // 继续尝试下一个选择器
+                }
+                
+                if (clicked) break;
+            }
+
+            // 等待一下，让页面响应
+            await this.bot.utils.wait(2000);
+            
+            // 检查任务是否完成
+            const isCompleted = await this.checkTaskCompletion(currentPage, task);
+            
+            if (clicked) {
+                this.bot.log(this.bot.isMobile, 'URL奖励', '成功点击奖励元素');
+                
+                if (isCompleted) {
+                    this.bot.log(this.bot.isMobile, 'URL奖励', '确认任务已完成');
+                } else {
+                    this.bot.log(this.bot.isMobile, 'URL奖励', '点击后任务状态不明确，可能需要等待或手动处理');
+                }
+            } else {
+                this.bot.log(this.bot.isMobile, 'URL奖励', '未找到可点击的奖励元素');
+                
+                if (isCompleted) {
+                    this.bot.log(this.bot.isMobile, 'URL奖励', '任务可能已经完成');
+                } else {
+                    this.bot.log(this.bot.isMobile, 'URL奖励', '任务状态不明确，可能需要手动处理');
                 }
             }
-
-            if (!clicked) {
-                this.bot.log(this.bot.isMobile, 'URL奖励', '未找到可点击的奖励元素，但任务可能已完成');
-            }
-
-            this.bot.log(this.bot.isMobile, 'URL奖励', '成功完成URL奖励');
             
         } catch (error: any) {
             // 如果导航失败，尝试在新标签页中打开

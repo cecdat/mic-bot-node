@@ -13,6 +13,7 @@ import { loadAccounts, loadConfig, loadNodeConfig, loadDailyPoints, saveDailyPoi
 import { LogPusher } from './util/LogPusher';
 import { accountStatusManager } from './util/AccountStatusManager';
 import { aiOrchestrator } from './util/AIOrcestrator';
+import { UpdateManager } from './utils/UpdateManager';
 import { Login } from './functions/Login';
 import { Workers } from './functions/Workers';
 import Activities from './functions/Activities';
@@ -145,6 +146,24 @@ async function updateActivityStatus(status: 'Running' | 'Idle') {
         );
         log('main', '主流程', `向服务器报告当前状态: [${status}]`);
     } catch (error) { /* Silent fail */ }
+}
+
+async function checkForUpdates(config: Config) {
+    try {
+        // 创建更新管理器
+        const updateManager = new UpdateManager(config, false); // 这里假设是桌面端，实际应该根据配置判断
+        
+        // 检查是否有更新
+        const hasUpdate = await updateManager.checkForUpdates();
+        
+        if (hasUpdate) {
+            log('main', '更新管理', '发现新版本，开始更新流程');
+            // 更新管理器会自动处理更新过程
+        }
+    } catch (error) {
+        log('main', '更新管理', `版本检查失败: ${error}`, 'error');
+        throw error;
+    }
 }
 
 async function confirmCommandToServer(command: string) {
@@ -647,6 +666,14 @@ async function main() {
     while (true) {
         try {
             log('main', '主流程', '正在向指挥中心请求指令 (长轮询)...');
+            
+            // 检查版本更新
+            try {
+                await checkForUpdates(config);
+            } catch (updateError) {
+                log('main', '更新检查', `版本检查失败: ${updateError}`, 'warn');
+            }
+            
             const commandUrl = new URL(config.apiServer.updateUrl);
             commandUrl.pathname = '/bot_api/command_poll';
 
