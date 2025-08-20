@@ -368,14 +368,38 @@ export class Login {
 
     private async isVerificationPage(page: Page): Promise<boolean> {
         try {
-            // 检查页面是否包含验证码相关的元素
+            // 首先检查页面URL和标题，排除已经登录成功的情况
+            const currentUrl = page.url();
+            const title = await page.title();
+            
+            this.bot.log(this.bot.isMobile, '登录', `检查验证页面 - URL: "${currentUrl}", 标题: "${title}"`);
+            
+            // 如果已经在rewards.bing.com或Microsoft Rewards页面，说明已经登录成功
+            if (currentUrl.includes('rewards.bing.com') || title.includes('Microsoft Rewards')) {
+                this.bot.log(this.bot.isMobile, '登录', '检测到已在Microsoft Rewards页面，非验证页面');
+                return false;
+            }
+            
+            // 检查页面内容
+            const pageText = await page.textContent('body');
+            
+            // 检查是否是"验证你的电子邮件"页面
+            if (title.includes('验证你的电子邮件') || title.includes('Verify your email')) {
+                this.bot.log(this.bot.isMobile, '登录', '通过页面标题检测到验证你的电子邮件页面');
+                return true;
+            }
+            
+            // 检查是否是身份验证选择页面（更精确的判断）
+            if (pageText && pageText.includes('验证你的身份') && (pageText.includes('发送电子邮件') || pageText.includes('@outlook.com'))) {
+                this.bot.log(this.bot.isMobile, '登录', '通过页面内容检测到身份验证选择页面');
+                return true;
+            }
+
+            // 检查是否有验证码输入框（更精确的选择器）
             const verificationSelectors = [
-                'input[type="text"]',
                 'input[name="otc"]',
                 '#otc',
                 '[data-testid*="otc"]',
-                'button:has-text("发送")',
-                'button:has-text("Send")',
                 '#proof-confirmation-email-input'
             ];
 
@@ -387,26 +411,9 @@ export class Login {
                 }
             }
 
-            // 检查页面标题和内容
-            const title = await page.title();
-            const pageText = await page.textContent('body');
-            
-            this.bot.log(this.bot.isMobile, '登录', `检查验证页面 - 标题: "${title}"`);
-            
-            // 检查是否是身份验证选择页面
-            if (pageText && (pageText.includes('验证你的身份') || pageText.includes('发送电子邮件'))) {
-                this.bot.log(this.bot.isMobile, '登录', '通过页面内容检测到身份验证选择页面');
-                return true;
-            }
-
-            // 检查是否是"验证你的电子邮件"页面
-            if (title.includes('验证你的电子邮件') || title.includes('Verify your email')) {
-                this.bot.log(this.bot.isMobile, '登录', '通过页面标题检测到验证你的电子邮件页面');
-                return true;
-            }
-
-            // 检查页面内容是否包含"验证你的电子邮件"相关关键词
-            if (pageText && (pageText.includes('验证你的电子邮件') || pageText.includes('发送代码') || pageText.includes('我们将向'))) {
+            // 检查页面内容是否包含"验证你的电子邮件"相关关键词（但排除已登录页面）
+            if (pageText && !currentUrl.includes('rewards.bing.com') && 
+                (pageText.includes('验证你的电子邮件') || pageText.includes('发送代码到') || pageText.includes('我们将向'))) {
                 this.bot.log(this.bot.isMobile, '登录', '通过页面内容关键词检测到验证页面');
                 return true;
             }

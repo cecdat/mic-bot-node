@@ -34,10 +34,19 @@ build/
 ehthumbs.db
 Thumbs.db
 
-# Test files (exclude get_all_hots.py as it's part of the project)
+# Test files and scripts
 test_*.py
 *_test.py
 *_test.ps1
+test_*.js
+test_*.ts
+test_*.html
+test_*.sh
+test_*.bat
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
 
 # Documentation files
 *_FIX_README.md
