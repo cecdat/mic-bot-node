@@ -84,6 +84,16 @@ export interface ConfigSaveFingerprint {
     desktop: boolean;
 }
 
+export interface ConfigRecording {
+    enableVideo: boolean;
+    enableHar: boolean;
+    videoDir: string;
+    videoSize: {
+        width: number;
+        height: number;
+    };
+}
+
 export interface Config {
     baseURL: string;
     sessionPath: string;
@@ -94,6 +104,7 @@ export interface Config {
     runOnZeroPoints: boolean;
     debug: boolean;
     saveFingerprint: ConfigSaveFingerprint;
+    recording?: ConfigRecording;
     workers: ConfigWorkers;
     searchOnBingLocalQueries: boolean;
     globalTimeout: number | string;

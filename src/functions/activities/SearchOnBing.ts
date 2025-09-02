@@ -17,7 +17,7 @@ export class SearchOnBing extends Workers {
 
             await this.bot.browser.utils.tryDismissAllMessages(page)
 
-            const query = await this.getSearchQuery(activity.title)
+            const query = await this.getSearchQueryFromRepo(activity.title)
 
             const searchBar = '#sb_form_q'
             await page.waitForSelector(searchBar, { state: 'visible', timeout: 10000 })
@@ -37,7 +37,7 @@ export class SearchOnBing extends Workers {
         }
     }
 
-    private async getSearchQuery(title: string): Promise<string> {
+    private async getSearchQueryFromRepo(title: string): Promise<string> {
         interface Queries {
             title: string;
             queries: string[]

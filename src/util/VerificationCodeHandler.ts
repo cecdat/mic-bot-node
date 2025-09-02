@@ -208,21 +208,21 @@ export class VerificationCodeHandler {
             // 方法1：查找包含"发送电子邮件"文本的元素
             const emailOption = await page.$('text="发送电子邮件", text="Send email"');
             if (emailOption) {
-                log('main', '验证码处理', '找到方法1的发送电子邮件选项');
+                // 移除找到方法1的发送电子邮件选项的日志，减少非关键信息输出
                 return emailOption;
             }
 
             // 方法2：查找包含邮箱地址的元素（更宽松的匹配）
             const emailWithAddress = await page.$('text=/向.*@.*发送电子邮件/, text=/Send email to.*@.*/');
             if (emailWithAddress) {
-                log('main', '验证码处理', '找到方法2的发送电子邮件选项');
+                // 移除找到方法2的发送电子邮件选项的日志，减少非关键信息输出
                 return emailWithAddress;
             }
 
             // 方法3：查找包含"@qq.com"等邮箱域名的元素
             const emailDomainOption = await page.$('text=/@qq\.com/, text=/@gmail\.com/, text=/@outlook\.com/, text=/@163\.com/');
             if (emailDomainOption) {
-                log('main', '验证码处理', '找到方法3的邮箱域名选项');
+                // 移除找到方法3的邮箱域名选项的日志，减少非关键信息输出
                 return emailDomainOption;
             }
 
@@ -616,35 +616,8 @@ export class VerificationCodeHandler {
      * 保存页面快照
      */
     private async savePageSnapshot(page: Page, snapshotName: string, deviceType: string = 'pc'): Promise<void> {
-        try {
-            // 保存HTML快照
-            const htmlContent = await page.content();
-            const fs = require('fs');
-            const path = require('path');
-            
-            // 创建快照目录
-            const snapshotDir = path.join('/app/sessions', 'verification_snapshots');
-            if (!fs.existsSync(snapshotDir)) {
-                fs.mkdirSync(snapshotDir, { recursive: true });
-            }
-            
-            // 根据设备类型设置前缀：桌面端用pc_，移动端用app_
-            const prefix = deviceType === 'mobile' ? 'app_' : 'pc_';
-            const timestamp = Date.now();
-            const fileName = `${prefix}${snapshotName}_${timestamp}`;
-            
-            // 保存HTML文件
-            const htmlPath = path.join(snapshotDir, `${fileName}.html`);
-            fs.writeFileSync(htmlPath, htmlContent);
-            
-            // 保存截图
-            const screenshotPath = path.join(snapshotDir, `${fileName}.png`);
-            await page.screenshot({ path: screenshotPath, fullPage: true });
-            
-            log('main', '验证码处理', `页面快照已保存: ${htmlPath}, ${screenshotPath}`);
-        } catch (error) {
-            log('main', '验证码处理', `保存页面快照失败: ${error}`, 'error');
-        }
+        // 正式环境禁用验证码快照保存
+        return;
     }
 
     /**

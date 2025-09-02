@@ -1,21 +1,16 @@
 import { randomBytes } from 'crypto'
 import { AxiosRequestConfig } from 'axios'
-
 import { Workers } from '../Workers'
-
 import { DashboardData } from '../../interface/DashboardData'
 
 
 export class DailyCheckIn extends Workers {
     public async doDailyCheckIn(accessToken: string, data: DashboardData) {
-        this.bot.log(this.bot.isMobile, 'DAILY-CHECK-IN', 'Starting Daily Check In')
+        this.bot.log(this.bot.isMobile, 'DAILY-CHECK-IN', '开始执行每日签到任务（API方式）')
 
         try {
             let geoLocale = data.userProfile.attributes.country
-            
-            // 增加安全检查，确保searchSettings存在
-            const useGeoLocaleQueries = this.bot.config.searchSettings?.useGeoLocaleQueries ?? true;
-            geoLocale = (useGeoLocaleQueries && geoLocale.length === 2) ? geoLocale.toLowerCase() : 'us'
+            geoLocale = (this.bot.config.searchSettings.useGeoLocaleQueries && geoLocale.length === 2) ? geoLocale.toLowerCase() : 'us'
 
             const jsonData = {
                 amount: 1,
@@ -39,14 +34,24 @@ export class DailyCheckIn extends Workers {
                 data: JSON.stringify(jsonData)
             }
 
-            const claimResponse = await this.bot.axios.request(claimRequest)
-            const claimedPoint = parseInt((await claimResponse.data).response?.activity?.p) ?? 0
+            this.bot.log(this.bot.isMobile, 'DAILY-CHECK-IN', `正在向Microsoft Rewards API发送签到请求...`);
+            this.bot.log(this.bot.isMobile, 'DAILY-CHECK-IN', `请求参数: ${JSON.stringify(jsonData)}`);
 
-            this.bot.log(this.bot.isMobile, 'DAILY-CHECK-IN', claimedPoint > 0 ? `Claimed ${claimedPoint} points` : 'Already claimed today')
+            const claimResponse = await this.bot.axios.request(claimRequest)
+            const responseData = await claimResponse.data
+            const claimedPoint = parseInt(responseData?.response?.activity?.p) ?? 0
+
+            if (claimedPoint > 0) {
+                this.bot.log(this.bot.isMobile, 'DAILY-CHECK-IN', `✅ 签到成功！获得 ${claimedPoint} 积分`);
+                return { success: true, points: claimedPoint, message: `签到成功，获得 ${claimedPoint} 积分` };
+            } else {
+                this.bot.log(this.bot.isMobile, 'DAILY-CHECK-IN', 'ℹ️ 今日已签到或签到失败');
+                return { success: true, points: 0, message: '今日已签到或签到失败' };
+            }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            this.bot.log(this.bot.isMobile, 'DAILY-CHECK-IN', `An error occurred: ${errorMessage}`, 'error')
+            this.bot.log(this.bot.isMobile, 'DAILY-CHECK-IN', `❌ 每日签到任务执行失败: ${errorMessage}`, 'error');
+            return { success: false, points: 0, message: errorMessage };
         }
     }
-
 }

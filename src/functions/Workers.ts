@@ -14,263 +14,442 @@ export class Workers {
     }
 
     /**
-     * 智能活动点击工具 - 基于成熟项目的优化版本
+     * 处理cookies授权弹窗
+     * @param page 当前页面
      */
-    private async smartActivityClick(currentPage: Page, taskTitle: string): Promise<boolean> {
-        this.bot.log(this.bot.isMobile, '智能点击', `开始智能点击活动: "${taskTitle}"`);
-        
+    private async handleCookiesConsent(page: Page): Promise<void> {
+        try {
+            // 等待页面加载完成
+            await this.bot.utils.wait(3000);
+            
+            this.bot.log(this.bot.isMobile, 'Cookies授权', '开始检测cookies授权弹窗...');
+            
+            // 方法1：查找所有可能的cookies授权按钮
+            const cookiesButtonSelectors = [
+                // 英文按钮
+                'button:has-text("Accept all")',
+                'button:has-text("Accept All")',
+                'button:has-text("Accept")',
+                'button:has-text("Allow all")',
+                'button:has-text("Allow All")',
+                'button:has-text("Allow")',
+                'button:has-text("I agree")',
+                'button:has-text("I Accept")',
+                'button:has-text("OK")',
+                'button:has-text("Yes")',
+                'button:has-text("Accept all cookies")',
+                'button:has-text("Accept cookies")',
+                'button:has-text("Allow all cookies")',
+                'button:has-text("Allow cookies")',
+                'button:has-text("I agree to cookies")',
+                
+                // 中文按钮
+                'button:has-text("接受所有")',
+                'button:has-text("接受")',
+                'button:has-text("允许所有")',
+                'button:has-text("允许")',
+                'button:has-text("同意")',
+                'button:has-text("确定")',
+                'button:has-text("是")',
+                'button:has-text("好")',
+                'button:has-text("好的")',
+                'button:has-text("接受所有cookies")',
+                'button:has-text("接受cookies")',
+                'button:has-text("允许所有cookies")',
+                'button:has-text("允许cookies")',
+                
+                // 数据属性选择器
+                '[data-testid="accept-all"]',
+                '[data-testid="accept"]',
+                '[data-testid="allow-all"]',
+                '[data-testid="allow"]',
+                '[data-testid="agree"]',
+                '[data-testid="cookie-accept"]',
+                '[data-testid="cookie-allow"]',
+                '[data-testid="consent-accept"]',
+                '[data-testid="consent-allow"]',
+                
+                // 类名选择器
+                '.accept-all',
+                '.accept',
+                '.allow-all',
+                '.allow',
+                '.agree',
+                '.consent-accept',
+                '.cookies-accept',
+                '.cookie-accept',
+                '.cookie-allow',
+                '.consent-button',
+                '.cookie-button',
+                
+                // ID选择器
+                '#accept-all',
+                '#accept',
+                '#allow-all',
+                '#allow',
+                '#agree',
+                '#consent-accept',
+                '#cookies-accept',
+                '#cookie-accept',
+                '#cookie-allow',
+                '#consent-button',
+                '#cookie-button'
+            ];
+            
+            let cookiesAccepted = false;
+            
+            // 尝试使用选择器查找按钮
+            for (const selector of cookiesButtonSelectors) {
+                try {
+                    const button = page.locator(selector);
+                    if (await button.count() > 0 && await button.isVisible({ timeout: 1000 })) {
+                        this.bot.log(this.bot.isMobile, 'Cookies授权', `找到cookies授权按钮: ${selector}`);
+                        
+                        // 滚动到按钮位置，确保可见
+                        await button.scrollIntoViewIfNeeded();
+                        await this.bot.utils.wait(500);
+                        
+                        // 点击按钮
+                        await button.click({ timeout: 5000 });
+                        this.bot.log(this.bot.isMobile, 'Cookies授权', '已点击cookies授权按钮');
+                        cookiesAccepted = true;
+                        await this.bot.utils.wait(2000); // 等待弹窗消失
+                        break;
+                    }
+                } catch (error) {
+                    continue;
+                }
+            }
+            
+            // 方法2：如果选择器方法失败，使用文本搜索方法
+            if (!cookiesAccepted) {
+                this.bot.log(this.bot.isMobile, 'Cookies授权', '选择器方法未找到按钮，尝试文本搜索方法...');
+                
+                try {
+                    // 查找页面中所有按钮
+                    const allButtons = page.locator('button, input[type="button"], input[type="submit"], a[role="button"]');
+                    const buttonCount = await allButtons.count();
+                    
+                    this.bot.log(this.bot.isMobile, 'Cookies授权', `页面中共找到 ${buttonCount} 个按钮，正在检查文本内容...`);
+                    
+                    for (let i = 0; i < buttonCount; i++) {
+                        try {
+                            const button = allButtons.nth(i);
+                            
+                            // 检查按钮是否可见
+                            if (!(await button.isVisible({ timeout: 1000 }))) {
+                                continue;
+                            }
+                            
+                            // 获取按钮文本
+                            const buttonText = await button.textContent();
+                            if (!buttonText || buttonText.trim() === '') {
+                                continue;
+                            }
+                            
+                            const buttonTextLower = buttonText.trim().toLowerCase();
+                            
+                            // 检查按钮文本是否包含cookies相关关键词
+                            if (buttonTextLower.includes('accept') || 
+                                buttonTextLower.includes('allow') || 
+                                buttonTextLower.includes('agree') || 
+                                buttonTextLower.includes('ok') || 
+                                buttonTextLower.includes('yes') ||
+                                buttonTextLower.includes('接受') || 
+                                buttonTextLower.includes('允许') || 
+                                buttonTextLower.includes('同意') || 
+                                buttonTextLower.includes('确定') || 
+                                buttonTextLower.includes('是') ||
+                                buttonTextLower.includes('好') ||
+                                buttonTextLower.includes('cookie') ||
+                                buttonTextLower.includes('consent')) {
+                                
+                                this.bot.log(this.bot.isMobile, 'Cookies授权', `通过文本匹配找到可能的cookies授权按钮: "${buttonText}"`);
+                                
+                                // 滚动到按钮位置，确保可见
+                                await button.scrollIntoViewIfNeeded();
+                                await this.bot.utils.wait(500);
+                                
+                                // 点击按钮
+                                await button.click({ timeout: 5000 });
+                                this.bot.log(this.bot.isMobile, 'Cookies授权', `已点击通过文本匹配找到的按钮: "${buttonText}"`);
+                                cookiesAccepted = true;
+                                await this.bot.utils.wait(2000); // 等待弹窗消失
+                                break;
+                            }
+                        } catch (error) {
+                            continue;
+                        }
+                    }
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, 'Cookies授权', `文本搜索方法出错: ${error}`, 'warn');
+                }
+            }
+            
+            // 方法3：查找包含cookies相关文本的任何元素
+            if (!cookiesAccepted) {
+                this.bot.log(this.bot.isMobile, 'Cookies授权', '前两种方法都失败，尝试查找包含cookies文本的元素...');
+                
+                try {
+                    // 查找包含cookies相关文本的元素
+                    const cookiesElements = page.locator('*:has-text("cookie"), *:has-text("Cookie"), *:has-text("cookies"), *:has-text("Cookies")');
+                    const elementCount = await cookiesElements.count();
+                    
+                    this.bot.log(this.bot.isMobile, 'Cookies授权', `找到 ${elementCount} 个包含cookies文本的元素`);
+                    
+                    for (let i = 0; i < elementCount; i++) {
+                        try {
+                            const element = cookiesElements.nth(i);
+                            
+                            // 检查元素是否可见
+                            if (!(await element.isVisible({ timeout: 1000 }))) {
+                                continue;
+                            }
+                            
+                            // 检查元素是否可点击
+                            const tagName = await element.evaluate(el => el.tagName.toLowerCase());
+                            if (tagName === 'button' || tagName === 'a' || tagName === 'input') {
+                                const elementText = await element.textContent();
+                                this.bot.log(this.bot.isMobile, 'Cookies授权', `找到可点击的cookies相关元素: ${tagName}, 文本: "${elementText}"`);
+                                
+                                // 滚动到元素位置，确保可见
+                                await element.scrollIntoViewIfNeeded();
+                                await this.bot.utils.wait(500);
+                                
+                                // 点击元素
+                                await element.click({ timeout: 5000 });
+                                this.bot.log(this.bot.isMobile, 'Cookies授权', `已点击cookies相关元素`);
+                                cookiesAccepted = true;
+                                await this.bot.utils.wait(2000); // 等待弹窗消失
+                                break;
+                            }
+                        } catch (error) {
+                            continue;
+                        }
+                    }
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, 'Cookies授权', `查找cookies文本元素方法出错: ${error}`, 'warn');
+                }
+            }
+            
+            if (cookiesAccepted) {
+                this.bot.log(this.bot.isMobile, 'Cookies授权', 'Cookies授权弹窗已成功处理');
+            } else {
+                this.bot.log(this.bot.isMobile, 'Cookies授权', '未找到cookies授权弹窗或已处理');
+            }
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, 'Cookies授权', `处理cookies授权弹窗时出错: ${errorMessage}`, 'warn');
+        }
+    }
+
+    /**
+     * 检查用户是否已登录Microsoft Rewards
+     * @param page 当前页面
+     * @returns 是否已登录
+     */
+    private async checkLoginStatus(page: Page): Promise<boolean> {
         try {
             // 等待页面完全加载
-            await this.bot.utils.wait(2000);
+            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
             
-            // 检查当前URL状态
-            const currentUrl = currentPage.url();
-            if (currentUrl.includes('rewards.bing.com') || currentUrl.includes('bing.com/rewards')) {
-                this.bot.log(this.bot.isMobile, '智能点击', '检测到已在Rewards页面，活动可能已完成');
+            // 优先检查已登录的明确标志
+            
+            // 方法1: 检查是否存在用户头像或账户信息（Microsoft Rewards页面特定）
+            const userAvatar = page.locator('[data-testid="identityBanner"], .user-avatar, .account-info, [aria-label*="@"], .profile_img, #img_sec, #redirect_info_link, [id*="mectrl"], [class*="profile"]');
+            if (await userAvatar.count() > 0) {
+                this.bot.log(this.bot.isMobile, '登录检查', '检测到用户头像或账户信息，用户已登录');
                 return true;
             }
 
-            // 基于参考项目的成熟选择器策略
-            const clickStrategies = [
-                // 策略1: Microsoft Rewards专用选择器（参考项目核心）
-                {
-                    name: 'Microsoft Rewards专用选择器',
-                    selectors: [
-                        '.offer-cta',                    // 官方活动按钮
-                        '.pointLink',                    // 积分链接
-                        'a[href*="rewards.bing.com"]',   // Rewards页面链接
-                        'a[href*="bing.com/rewards"]',   // Bing Rewards链接
-                        '[data-bi-id*="Rewards"]',       // 官方数据属性
-                        '[data-bi-id*="rewards"]',       // 小写rewards
-                        'button[onclick*="rewards"]',    // 奖励按钮
-                        'button[onclick*="promotion"]',  // 推广按钮
-                        'button[onclick*="activity"]'    // 活动按钮
-                    ]
-                },
-                // 策略2: 活动类型特定选择器
-                {
-                    name: '活动类型特定选择器',
-                    selectors: [
-                        '.activity-link',                // 活动链接
-                        '.promotion-link',               // 推广链接
-                        '.reward-link',                  // 奖励链接
-                        '.earn-points-link',             // 赚取积分链接
-                        '.start-activity',               // 开始活动
-                        '.begin-activity',               // 开始活动
-                        '.quiz-link',                    // 测验链接
-                        '.poll-link',                    // 投票链接
-                        '.punchcard-link'                // 打卡链接
-                    ]
-                },
-                // 策略3: 通用奖励选择器
-                {
-                    name: '通用奖励选择器',
-                    selectors: [
-                        'a[href*="rewards"]',            // 包含rewards的链接
-                        'a[href*="bing.com/spotlight"]', // Bing Spotlight
-                        'a[href*="bing.com/search"]',    // Bing搜索
-                        'a[href*="microsoft.com/rewards"]', // Microsoft Rewards
-                        'a[href*="bing.com/explore"]',   // Bing探索
-                        'a[href*="bing.com/discover"]'   // Bing发现
-                    ]
-                },
-                // 策略4: 按钮和交互元素
-                {
-                    name: '按钮和交互元素',
-                    selectors: [
-                        'button[class*="reward"]',       // 奖励按钮
-                        'button[class*="promotion"]',    // 推广按钮
-                        'button[class*="activity"]',     // 活动按钮
-                        'button[class*="point"]',        // 积分按钮
-                        'button[class*="earn"]',         // 赚取按钮
-                        'button[class*="start"]',        // 开始按钮
-                        'button[class*="begin"]',        // 开始按钮
-                        'button[class*="click"]',        // 点击按钮
-                        'button[class*="complete"]',     // 完成按钮
-                        'button[class*="join"]'          // 加入按钮
-                    ]
-                },
-                // 策略5: 文本内容选择器（基于用户行为）
-                {
-                    name: '文本内容选择器',
-                    selectors: [
-                        'a:has-text("Earn")',            // 赚取
-                        'a:has-text("Get points")',      // 获得积分
-                        'a:has-text("Start")',           // 开始
-                        'a:has-text("Begin")',           // 开始
-                        'a:has-text("Click here")',      // 点击这里
-                        'a:has-text("Continue")',        // 继续
-                        'a:has-text("Learn more")',      // 了解更多
-                        'a:has-text("Read more")',       // 阅读更多
-                        'a:has-text("Take quiz")',       // 参加测验
-                        'a:has-text("Play game")',       // 玩游戏
-                        'a:has-text("Watch video")',     // 观看视频
-                        'a:has-text("Complete")',        // 完成
-                        'a:has-text("Join")',            // 加入
-                        'a:has-text("Participate")',     // 参与
-                        'a:has-text("Claim")',           // 领取
-                        'a:has-text("Collect")',         // 收集
-                        'a:has-text("Unlock")',          // 解锁
-                        'a:has-text("Discover")',        // 发现
-                        'a:has-text("Explore")'          // 探索
-                    ]
-                },
-                // 策略6: 图片和视觉元素
-                {
-                    name: '图片和视觉元素',
-                    selectors: [
-                        'a img[src*="reward"]',          // 奖励图片
-                        'a img[src*="promotion"]',       // 推广图片
-                        'a img[src*="activity"]',        // 活动图片
-                        'a img[src*="point"]',           // 积分图片
-                        'a img[src*="earn"]',            // 赚取图片
-                        'a img[src*="quiz"]',            // 测验图片
-                        'a img[src*="poll"]',            // 投票图片
-                        'a img[src*="game"]',            // 游戏图片
-                        'a img[src*="video"]'            // 视频图片
-                    ]
-                },
-                // 策略7: 通用类名选择器
-                {
-                    name: '通用类名选择器',
-                    selectors: [
-                        'a[class*="reward"]',            // 奖励类
-                        'a[class*="promotion"]',         // 推广类
-                        'a[class*="activity"]',          // 活动类
-                        'a[class*="point"]',             // 积分类
-                        'a[class*="earn"]',              // 赚取类
-                        'a[class*="start"]',             // 开始类
-                        'a[class*="begin"]',             // 开始类
-                        'a[class*="click"]',             // 点击类
-                        'a[class*="complete"]',          // 完成类
-                        'a[class*="join"]',              // 加入类
-                        'a[class*="claim"]',             // 领取类
-                        'a[class*="collect"]',           // 收集类
-                        'a[class*="unlock"]',            // 解锁类
-                        'a[class*="discover"]',          // 发现类
-                        'a[class*="explore"]'            // 探索类
-                    ]
-                }
-            ];
+            // 方法2: 检查页面是否包含Microsoft Rewards特定的用户信息元素
+            const rewardsUserInfo = page.locator('#redirect_info_link, #img_sec, .profile_img, [id*="mectrl"], [class*="profile"], [id*="profile"]');
+            if (await rewardsUserInfo.count() > 0) {
+                this.bot.log(this.bot.isMobile, '登录检查', '检测到Microsoft Rewards用户信息元素，用户已登录');
+                return true;
+            }
 
-            // 执行每个策略
-            for (const strategy of clickStrategies) {
-                this.bot.log(this.bot.isMobile, '智能点击', `尝试策略: ${strategy.name}`);
+            // 方法3: 检查页面是否包含用户邮箱信息
+            const userEmail = page.locator('text=@outlook.com, text=@hotmail.com, text=@gmail.com, text=@live.com');
+            if (await userEmail.count() > 0) {
+                this.bot.log(this.bot.isMobile, '登录检查', '检测到用户邮箱信息，用户已登录');
+                return true;
+            }
+
+            // 方法4: 检查页面是否包含"注销"或"Sign out"链接（说明已登录）
+            const signOutLink = page.locator('a:has-text("注销"), a:has-text("Sign out"), a:has-text("登出"), [href*="Signout"]');
+            if (await signOutLink.count() > 0) {
+                this.bot.log(this.bot.isMobile, '登录检查', '检测到注销链接，用户已登录');
+                return true;
+            }
+
+            // 方法5: 检查URL是否包含用户信息
+            const currentUrl = page.url();
+            if (currentUrl.includes('uaid=') || currentUrl.includes('account.live.com')) {
+                this.bot.log(this.bot.isMobile, '登录检查', 'URL包含用户信息，用户已登录');
+                return true;
+            }
+
+            // 方法6: 检查页面内容是否包含积分信息
+            const pointsInfo = page.locator('text=points, text=积分, text=Rewards, text=奖励');
+            if (await pointsInfo.count() > 0) {
+                this.bot.log(this.bot.isMobile, '登录检查', '页面包含积分信息，用户已登录');
+                return true;
+            }
+
+            // 方法7: 检查页面是否包含Microsoft账户相关的元素（说明已登录）
+            const microsoftAccountElements = page.locator('[data-testid*="account"], [data-testid*="user"], [class*="account"], [class*="user"], [id*="account"], [id*="user"]');
+            if (await microsoftAccountElements.count() > 0) {
+                this.bot.log(this.bot.isMobile, '登录检查', '检测到Microsoft账户相关元素，用户已登录');
+                return true;
+            }
+
+            // 方法8: 检查页面是否包含活动相关的元素（说明已登录）
+            const activityElements = page.locator('[data-bi-id], .pointLink, .activity-item, [class*="activity"], [class*="task"]');
+            if (await activityElements.count() > 0) {
+                this.bot.log(this.bot.isMobile, '登录检查', '检测到活动相关元素，用户已登录');
+                return true;
+            }
+
+            // 最后检查页面标题是否包含登录相关关键词（作为未登录的确认）
+            const pageTitle = await page.title();
+            if (pageTitle.toLowerCase().includes('sign in') || 
+                pageTitle.toLowerCase().includes('login') || 
+                pageTitle.toLowerCase().includes('登录') ||
+                pageTitle.toLowerCase().includes('signin')) {
+                this.bot.log(this.bot.isMobile, '登录检查', '页面标题显示需要登录');
+                return false;
+            }
+
+            // 只有在没有找到任何已登录标志时，才检查是否存在明显的登录按钮
+            // 使用更精确的选择器，避免误判
+            // 注意：活动页面可能包含页眉/页脚的通用登录链接，这些不应该作为未登录的判断依据
+            const loginButton = page.locator('a[href*="login"], a[href*="signin"], button[onclick*="login"], button[onclick*="signin"], a:has-text("Sign in"):not([href*="account"]), a:has-text("登录"):not([href*="account"])');
+            if (await loginButton.count() > 0) {
+                // 进一步检查：如果页面包含活动相关元素，说明用户已登录，忽略页眉/页脚的登录链接
+                const hasActivityElements = await page.locator('[data-bi-id], .pointLink, .activity-item, [class*="activity"], [class*="task"]').count() > 0;
+                if (hasActivityElements) {
+                    this.bot.log(this.bot.isMobile, '登录检查', '页面包含活动元素，忽略页眉/页脚的登录链接，用户已登录');
+                    return true;
+                }
                 
-                for (const selector of strategy.selectors) {
-                    try {
-                        const locator = currentPage.locator(selector);
-                        const count = await locator.count();
-                        
-                        if (count > 0) {
-                            // 遍历所有匹配的元素
-                            for (let i = 0; i < count; i++) {
-                                const element = locator.nth(i);
-                                
-                                // 检查元素是否可见且可点击
-                                if (await element.isVisible({ timeout: 2000 })) {
-                                    try {
-                                        // 获取元素信息用于调试
-                                        const tagName = await element.evaluate(el => el.tagName.toLowerCase());
-                                        const className = await element.getAttribute('class') || '';
-                                        const href = await element.getAttribute('href') || '';
-                                        
-                                        this.bot.log(this.bot.isMobile, '智能点击', `尝试点击: ${tagName}${className ? '.' + className.split(' ')[0] : ''}${href ? ' -> ' + href : ''}`);
-                                        
-                                        // 尝试点击元素
-                                        await element.click({ timeout: 5000 });
-                                        
-                                        this.bot.log(this.bot.isMobile, '智能点击', `成功点击元素: ${selector} (第${i+1}个)`);
-                                        
-                                        // 等待页面响应
-                                        await this.bot.utils.wait(3000);
-                                        
-                                        // 检查是否跳转到新页面或URL发生变化
-                                        const newUrl = currentPage.url();
-                                        if (newUrl !== currentUrl) {
-                                            this.bot.log(this.bot.isMobile, '智能点击', `页面已跳转到: ${newUrl}`);
-                                            return true;
-                                        }
-                                        
-                                        // 检查是否出现成功提示或完成状态
-                                        const successIndicators = [
-                                            'text=completed',
-                                            'text=success',
-                                            'text=earned',
-                                            'text=points',
-                                            'text=thank you',
-                                            'text=done'
-                                        ];
-                                        
-                                        for (const indicator of successIndicators) {
-                                            try {
-                                                const indicatorElement = currentPage.locator(indicator);
-                                                if (await indicatorElement.isVisible({ timeout: 1000 })) {
-                                                    this.bot.log(this.bot.isMobile, '智能点击', `检测到成功指示器: ${indicator}`);
-                                                    return true;
-                                                }
-                                            } catch (e) {
-                                                // 忽略指示器检查错误
-                                            }
-                                        }
-                                        
-                                        return true; // 点击成功，即使没有明显的页面变化
-                                        
-                                    } catch (clickError) {
-                                        this.bot.log(this.bot.isMobile, '智能点击', `点击元素失败: ${selector} (第${i+1}个) - ${clickError}`, 'warn');
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    } catch (selectorError) {
-                        // 继续尝试下一个选择器
-                        continue;
-                    }
+                // 检查登录按钮是否真的可见且可点击
+                const visibleLoginButton = await loginButton.filter({ hasText: /^(Sign in|登录)$/i }).first();
+                if (await visibleLoginButton.isVisible({ timeout: 2000 })) {
+                    this.bot.log(this.bot.isMobile, '登录检查', '检测到明显的登录按钮，用户未登录');
+                    return false;
                 }
             }
 
-            // 如果所有策略都失败，尝试最后的备用方法
-            this.bot.log(this.bot.isMobile, '智能点击', '所有策略失败，尝试备用方法');
-            
-            try {
-                // 查找页面上的所有链接
-                const allLinks = currentPage.locator('a[href]');
-                const linkCount = await allLinks.count();
-                
-                this.bot.log(this.bot.isMobile, '智能点击', `页面共有 ${linkCount} 个链接`);
-                
-                for (let i = 0; i < Math.min(linkCount, 20); i++) {
-                    const link = allLinks.nth(i);
-                    if (await link.isVisible({ timeout: 1000 })) {
-                        const href = await link.getAttribute('href');
-                        const text = await link.textContent() || '';
-                        
-                        if (href && (
-                            href.includes('rewards') || 
-                            href.includes('bing.com') || 
-                            href.includes('microsoft.com') ||
-                            text.toLowerCase().includes('earn') ||
-                            text.toLowerCase().includes('point') ||
-                            text.toLowerCase().includes('start') ||
-                            text.toLowerCase().includes('begin')
-                        )) {
-                            this.bot.log(this.bot.isMobile, '智能点击', `备用方法点击链接: ${text} -> ${href}`);
-                            await link.click({ timeout: 5000 });
-                            await this.bot.utils.wait(3000);
-                            return true;
-                        }
-                    }
-                }
-            } catch (fallbackError) {
-                this.bot.log(this.bot.isMobile, '智能点击', `备用方法也失败: ${fallbackError}`, 'warn');
-            }
-
-            this.bot.log(this.bot.isMobile, '智能点击', '所有点击方法都失败');
-            return false;
-            
+            // 如果以上都没有明确指示，但页面不是登录页面，则假设已登录
+            // 因为活动页面通常需要登录才能访问
+            this.bot.log(this.bot.isMobile, '登录检查', '未找到明确的登录状态指示，但页面不是登录页面，假设已登录');
+            return true;
         } catch (error) {
-            this.bot.log(this.bot.isMobile, '智能点击', `智能点击过程中发生错误: ${error}`, 'error');
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '登录检查', `检查登录状态时出错: ${errorMessage}`, 'warn');
+            return false;
+        }
+    }
+
+    /**
+     * 智能点击活动链接并执行任务
+     */
+    public async smartActivityClick(currentPage: Page, activity: any): Promise<boolean> {
+        try {
+            // 首先处理cookies授权弹窗，确保登录状态正确
+            await this.handleCookiesConsent(currentPage);
+            
+            // 检查当前页面登录状态
+            const isLoggedIn = await this.checkLoginStatus(currentPage);
+            if (!isLoggedIn) {
+                this.bot.log(this.bot.isMobile, '智能点击', '检测到用户未登录Microsoft Rewards，无法执行活动任务', 'warn');
+                return false;
+            }
+
+            // 屏幕录像功能已禁用（根据配置）
+
+            // 构建选择器
+            let selector = `[data-bi-id^="${activity.offerId || ''}"] .pointLink:not(.contentContainer .pointLink)`;
+            
+            // 特殊处理某些活动名称
+            if (activity.title && activity.title.includes('电影之夜')) {
+                selector = '[data-bi-id="morepromotions"] .pointLink:not(.contentContainer .pointLink)';
+            } else if (activity.title && activity.title.includes('合家欢视频')) {
+                selector = '[data-bi-id="morepromotions"] .pointLink:not(.contentContainer .pointLink)';
+            } else if (activity.title && activity.title.includes('吴哥在等待')) {
+                selector = '[data-bi-id="morepromotions"] .pointLink:not(.contentContainer .pointLink)';
+            } else if (activity.title && activity.title.includes('可爱的海獭')) {
+                selector = '[data-bi-id="morepromotions"] .pointLink:not(.contentContainer .pointLink)';
+            }
+
+            // 备用选择器
+            if (!(await currentPage.locator(selector).count())) {
+                selector = '.pointLink:not(.contentContainer .pointLink)';
+            }
+
+            this.bot.log(this.bot.isMobile, '智能点击', `点击活动: ${activity.title}`);
+            this.bot.log(this.bot.isMobile, '智能点击', `使用选择器: ${selector}`);
+            
+            // 记录点击前的页面状态
+            this.bot.log(this.bot.isMobile, '智能点击', `点击前页面URL: ${currentPage.url()}`);
+            
+            // 点击活动链接
+            await currentPage.click(selector);
+            this.bot.log(this.bot.isMobile, '智能点击', '活动链接已点击，等待新标签页打开...');
+
+            // 等待新标签页打开
+            await this.bot.utils.wait(3000);
+            
+            // 获取新标签页
+            const pages = currentPage.context().pages();
+            const newPage = pages[pages.length - 1];
+            
+            if (!newPage || newPage === currentPage) {
+                this.bot.log(this.bot.isMobile, '智能点击', '未检测到新标签页，可能在同一页面执行', 'warn');
+                
+                            // 屏幕录像功能已禁用
+                
+                return true;
+            }
+            
+            this.bot.log(this.bot.isMobile, '智能点击', `新标签页已打开: ${newPage.url()}`);
+            this.bot.log(this.bot.isMobile, '智能点击', `新标签页标题: ${await newPage.title()}`);
+
+            // 等待新标签页加载完成
+            try {
+                await newPage.waitForLoadState('networkidle', { timeout: 10000 });
+                this.bot.log(this.bot.isMobile, '智能点击', '新标签页加载完成');
+            } catch (error) {
+                this.bot.log(this.bot.isMobile, '智能点击', `等待新标签页加载超时: ${error}`, 'warn');
+            }
+
+            // 记录新标签页的详细信息
+            this.bot.log(this.bot.isMobile, '智能点击', `新标签页最终URL: ${newPage.url()}`);
+            this.bot.log(this.bot.isMobile, '智能点击', `新标签页最终标题: ${await newPage.title()}`);
+            
+            // 检查新标签页的登录状态
+            const newPageLoginStatus = await this.checkLoginStatus(newPage);
+            this.bot.log(this.bot.isMobile, '智能点击', `新标签页登录状态: ${newPageLoginStatus ? '已登录' : '未登录'}`);
+
+            // 执行活动任务
+            this.bot.log(this.bot.isMobile, '智能点击', '开始在新标签页中执行活动任务...');
+            const success = await this.executeActivityByType(newPage, activity);
+            
+            // 关闭新标签页
+            await newPage.close();
+            this.bot.log(this.bot.isMobile, '智能点击', '活动标签页已关闭');
+
+            // 屏幕录像功能已禁用
+
+            return success;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '智能点击', `执行活动时出错: ${errorMessage}`, 'error');
+            
+            // 屏幕录像功能已禁用
+            
             return false;
         }
     }
@@ -366,7 +545,7 @@ export class Workers {
             });
 
             // 使用智能点击工具处理URL奖励
-            const clickSuccess = await this.smartActivityClick(currentPage, task.title);
+            const clickSuccess = await this.smartActivityClick(currentPage, task);
             
             if (clickSuccess) {
                 this.bot.log(this.bot.isMobile, 'URL奖励', `URL奖励任务 "${task.title}" 执行成功`);
@@ -457,7 +636,7 @@ export class Workers {
             if (!quizStarted) {
                 // 如果没有找到开始按钮，尝试直接点击活动链接
                 this.bot.log(this.bot.isMobile, '测验', '未找到测验开始按钮，尝试直接点击活动链接');
-                const clickSuccess = await this.smartActivityClick(currentPage, task.title);
+                const clickSuccess = await this.smartActivityClick(currentPage, task);
                 if (clickSuccess) {
                     this.bot.log(this.bot.isMobile, '测验', '成功点击测验活动链接');
                 }
@@ -563,7 +742,7 @@ export class Workers {
             if (!punchCardStarted) {
                 // 如果没有找到打卡按钮，尝试直接点击活动链接
                 this.bot.log(this.bot.isMobile, '打卡任务', '未找到打卡按钮，尝试直接点击活动链接');
-                const clickSuccess = await this.smartActivityClick(currentPage, task.title);
+                const clickSuccess = await this.smartActivityClick(currentPage, task);
                 if (clickSuccess) {
                     this.bot.log(this.bot.isMobile, '打卡任务', '成功点击打卡活动链接');
                 }
@@ -624,7 +803,7 @@ export class Workers {
             });
 
             // 使用智能点击工具处理活动
-            const clickSuccess = await this.smartActivityClick(currentPage, task.title);
+            const clickSuccess = await this.smartActivityClick(currentPage, task);
             
             if (clickSuccess) {
                 this.bot.log(this.bot.isMobile, '活动执行', `任务 "${task.title}" 执行成功`);
@@ -652,7 +831,527 @@ export class Workers {
         }
     }
 
+    /**
+     * 根据活动类型执行相应的任务
+     */
+    private async executeActivityByType(page: Page, activity: any): Promise<boolean> {
+        try {
+            this.bot.log(this.bot.isMobile, '活动执行', `开始执行活动类型: ${activity.promotionType}`);
+            
+            // 检查新标签页的登录状态
+            const isLoggedIn = await this.checkLoginStatus(page);
+            if (!isLoggedIn) {
+                this.bot.log(this.bot.isMobile, '活动执行', '新标签页未登录，开始执行认证恢复流程', 'warn');
+                
+                // 步骤1：等待一段时间让页面完全加载
+                this.bot.log(this.bot.isMobile, '活动执行', '等待页面完全加载...');
+                await this.bot.utils.wait(5000);
+                
+                // 步骤2：尝试刷新页面，看是否能恢复登录状态
+                this.bot.log(this.bot.isMobile, '活动执行', '尝试刷新页面恢复登录状态...');
+                await page.reload({ waitUntil: 'networkidle' });
+                await this.bot.utils.wait(3000);
+                
+                // 步骤3：再次检查登录状态
+                const retryLoginStatus = await this.checkLoginStatus(page);
+                if (retryLoginStatus) {
+                    this.bot.log(this.bot.isMobile, '活动执行', '页面刷新后登录状态已恢复');
+                } else {
+                    this.bot.log(this.bot.isMobile, '活动执行', '页面刷新后仍未登录，尝试其他认证恢复方法', 'warn');
+                    
+                    // 步骤4：检查是否是必应搜索页面，这是正常的任务跳转，不需要强制跳转回rewards页面
+                    if (page.url().includes('bing.com/search')) {
+                        this.bot.log(this.bot.isMobile, '活动执行', '检测到必应搜索页面，这是正常的任务跳转，继续执行搜索任务');
+                        // 对于搜索任务，跳转到必应搜索页面是正常的，不需要跳转回rewards页面
+                    } else {
+                        // 只有在非搜索页且未登录的情况下，才尝试访问Microsoft Rewards页面恢复登录状态
+                        this.bot.log(this.bot.isMobile, '活动执行', '检测到非搜索页面且未登录，尝试访问Microsoft Rewards页面恢复登录状态...');
+                        
+                        try {
+                            // 尝试访问Microsoft Rewards页面
+                            await page.goto('https://rewards.bing.com', { waitUntil: 'networkidle' });
+                            await this.bot.utils.wait(3000);
+                            
+                            // 检查是否恢复了登录状态
+                            const rewardsLoginStatus = await this.checkLoginStatus(page);
+                            if (rewardsLoginStatus) {
+                                this.bot.log(this.bot.isMobile, '活动执行', '通过访问Microsoft Rewards页面恢复了登录状态');
+                                
+                                // 重新回到原始页面
+                                await page.goto(page.url(), { waitUntil: 'networkidle' });
+                                await this.bot.utils.wait(3000);
+                            } else {
+                                this.bot.log(this.bot.isMobile, '活动执行', '即使访问Microsoft Rewards页面仍未登录，可能认证已过期', 'error');
+                            }
+                        } catch (error) {
+                            this.bot.log(this.bot.isMobile, '活动执行', `访问Microsoft Rewards页面失败: ${error}`, 'error');
+                        }
+                    }
+                }
+            }
+            
+            // 根据活动类型执行相应的任务
+            switch (activity.promotionType) {
+                case 'quiz':
+                    return await this.executeQuizActivity(page, activity);
+                case 'urlreward':
+                    if (activity.name && activity.name.toLowerCase().includes('exploreonbing')) {
+                        return await this.executeSearchOnBingActivity(page, activity);
+                    } else {
+                        return await this.executeUrlRewardActivity(page, activity);
+                    }
+                default:
+                    this.bot.log(this.bot.isMobile, '活动执行', `未知的活动类型: ${activity.promotionType}`, 'warn');
+                    return false;
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '活动执行', `执行活动类型时出错: ${errorMessage}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * 执行测验类活动
+     */
+    private async executeQuizActivity(page: Page, activity: any): Promise<boolean> {
+        try {
+            this.bot.log(this.bot.isMobile, '测验活动', `执行测验: ${activity.title}`);
+            
+            // 等待页面加载完成
+            await this.bot.utils.wait(3000);
+            
+            // 根据积分数量判断测验类型
+            switch (activity.pointProgressMax) {
+                case 10:
+                    // 投票或ABC测验
+                    if (activity.destinationUrl && activity.destinationUrl.toLowerCase().includes('pollscenarioid')) {
+                        this.bot.log(this.bot.isMobile, '测验活动', '检测到投票类型测验');
+                        return await this.executePollActivity(page);
+                    } else {
+                        this.bot.log(this.bot.isMobile, '测验活动', '检测到ABC类型测验');
+                        return await this.executeABCActivity(page);
+                    }
+                    
+                case 50:
+                    // This Or That测验
+                    this.bot.log(this.bot.isMobile, '测验活动', '检测到This Or That测验');
+                    return await this.executeThisOrThatActivity(page);
+                    
+                default:
+                    // 其他测验类型
+                    this.bot.log(this.bot.isMobile, '测验活动', '检测到通用测验类型');
+                    return await this.executeGenericQuizActivity(page);
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '测验活动', `执行测验时出错: ${errorMessage}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * 执行必应搜索活动
+     */
+    private async executeSearchOnBingActivity(page: Page, activity: any): Promise<boolean> {
+        try {
+            this.bot.log(this.bot.isMobile, '必应搜索', `执行必应搜索活动: ${activity.title}`);
+            
+            // 等待页面加载
+            await this.bot.utils.wait(5000);
+            
+            // 尝试关闭所有消息提示
+            await this.tryDismissAllMessages(page);
+            
+            // 获取搜索查询
+            const query = await this.getSearchQuery(activity.title);
+            
+            // 查找搜索框
+            const searchBar = '#sb_form_q';
+            await page.waitForSelector(searchBar, { state: 'visible', timeout: 10000 });
+            
+            // 执行搜索
+            await page.click(searchBar);
+            await this.bot.utils.wait(500);
+            await page.keyboard.type(query);
+            await page.keyboard.press('Enter');
+            await this.bot.utils.wait(3000);
+            
+            this.bot.log(this.bot.isMobile, '必应搜索', '必应搜索活动完成');
+            return true;
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '必应搜索', `执行必应搜索时出错: ${errorMessage}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * 执行URL奖励活动
+     */
+    private async executeUrlRewardActivity(page: Page, activity: any): Promise<boolean> {
+        try {
+            this.bot.log(this.bot.isMobile, 'URL奖励', `执行URL奖励活动: ${activity.title}`);
+            
+            // 等待页面加载
+            await this.bot.utils.wait(2000);
+            
+            this.bot.log(this.bot.isMobile, 'URL奖励', 'URL奖励活动完成');
+            return true;
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, 'URL奖励', `执行URL奖励时出错: ${errorMessage}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * 执行投票活动
+     */
+    private async executePollActivity(page: Page): Promise<boolean> {
+        try {
+            this.bot.log(this.bot.isMobile, '投票活动', '开始执行投票活动');
+            
+            // 等待投票选项加载
+            await this.bot.utils.wait(3000);
+            
+            // 查找投票选项
+            const pollOptions = page.locator('input[type="radio"], input[type="checkbox"]');
+            const optionCount = await pollOptions.count();
+            
+            if (optionCount > 0) {
+                // 随机选择一个选项
+                const randomIndex = Math.floor(Math.random() * optionCount);
+                const selectedOption = pollOptions.nth(randomIndex);
+                
+                await selectedOption.click();
+                this.bot.log(this.bot.isMobile, '投票活动', `选择了第${randomIndex + 1}个选项`);
+                
+                // 查找提交按钮
+                const submitButton = page.locator('button[type="submit"], input[type="submit"], button:has-text("Submit"), button:has-text("提交")');
+                if (await submitButton.count() > 0) {
+                    await submitButton.first().click();
+                    this.bot.log(this.bot.isMobile, '投票活动', '已提交投票');
+                }
+                
+                await this.bot.utils.wait(3000);
+                return true;
+            }
+            
+            this.bot.log(this.bot.isMobile, '投票活动', '未找到投票选项');
+            return false;
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '投票活动', `执行投票时出错: ${errorMessage}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * 执行ABC测验活动
+     */
+    private async executeABCActivity(page: Page): Promise<boolean> {
+        try {
+            this.bot.log(this.bot.isMobile, 'ABC测验', '开始执行ABC测验活动');
+            
+            // 等待测验选项加载
+            await this.bot.utils.wait(3000);
+            
+            // 查找测验选项
+            const quizOptions = page.locator('input[type="radio"], input[type="checkbox"]');
+            const optionCount = await quizOptions.count();
+            
+            if (optionCount > 0) {
+                // 随机选择一个选项
+                const randomIndex = Math.floor(Math.random() * optionCount);
+                const selectedOption = quizOptions.nth(randomIndex);
+                
+                await selectedOption.click();
+                this.bot.log(this.bot.isMobile, 'ABC测验', `选择了第${randomIndex + 1}个选项`);
+                
+                // 查找提交按钮
+                const submitButton = page.locator('button[type="submit"], input[type="submit"], button:has-text("Submit"), button:has-text("提交")');
+                if (await submitButton.count() > 0) {
+                    await submitButton.first().click();
+                    this.bot.log(this.bot.isMobile, 'ABC测验', '已提交答案');
+                }
+                
+                await this.bot.utils.wait(3000);
+                return true;
+            }
+            
+            this.bot.log(this.bot.isMobile, 'ABC测验', '未找到测验选项');
+            return false;
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, 'ABC测验', `执行ABC测验时出错: ${errorMessage}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * 执行This Or That测验活动
+     */
+    private async executeThisOrThatActivity(page: Page): Promise<boolean> {
+        try {
+            this.bot.log(this.bot.isMobile, 'This Or That', '开始执行This Or That测验活动');
+            
+            // 等待测验选项加载
+            await this.bot.utils.wait(3000);
+            
+            // 查找测验选项
+            const quizOptions = page.locator('input[type="radio"], input[type="checkbox"]');
+            const optionCount = await quizOptions.count();
+            
+            if (optionCount > 0) {
+                // 随机选择一个选项
+                const randomIndex = Math.floor(Math.random() * optionCount);
+                const selectedOption = quizOptions.nth(randomIndex);
+                
+                await selectedOption.click();
+                this.bot.log(this.bot.isMobile, 'This Or That', `选择了第${randomIndex + 1}个选项`);
+                
+                // 查找提交按钮
+                const submitButton = page.locator('button[type="submit"], input[type="submit"], button:has-text("Submit"), button:has-text("提交")');
+                if (await submitButton.count() > 0) {
+                    await submitButton.first().click();
+                    this.bot.log(this.bot.isMobile, 'This Or That', '已提交答案');
+                }
+                
+                await this.bot.utils.wait(3000);
+                return true;
+            }
+            
+            this.bot.log(this.bot.isMobile, 'This Or That', '未找到测验选项');
+            return false;
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, 'This Or That', `执行This Or That测验时出错: ${errorMessage}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * 执行通用测验活动
+     */
+    private async executeGenericQuizActivity(page: Page): Promise<boolean> {
+        try {
+            this.bot.log(this.bot.isMobile, '通用测验', '开始执行通用测验活动');
+            
+            // 等待测验选项加载
+            await this.bot.utils.wait(3000);
+            
+            // 查找测验选项
+            const quizOptions = page.locator('input[type="radio"], input[type="checkbox"]');
+            const optionCount = await quizOptions.count();
+            
+            if (optionCount > 0) {
+                // 随机选择一个选项
+                const randomIndex = Math.floor(Math.random() * optionCount);
+                const selectedOption = quizOptions.nth(randomIndex);
+                
+                await selectedOption.click();
+                this.bot.log(this.bot.isMobile, '通用测验', `选择了第${randomIndex + 1}个选项`);
+                
+                // 查找提交按钮
+                const submitButton = page.locator('button[type="submit"], input[type="submit"], button:has-text("Submit"), button:has-text("提交")');
+                if (await submitButton.count() > 0) {
+                    await submitButton.first().click();
+                    this.bot.log(this.bot.isMobile, '通用测验', '已提交答案');
+                }
+                
+                await this.bot.utils.wait(3000);
+                return true;
+            }
+            
+            this.bot.log(this.bot.isMobile, '通用测验', '未找到测验选项');
+            return false;
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '通用测验', `执行通用测验时出错: ${errorMessage}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * 获取搜索查询
+     */
+    private async getSearchQuery(title: string): Promise<string> {
+        // 确保title不为空
+        const safeTitle = title || 'microsoft rewards';
+        
+        try {
+            // 简单的搜索查询生成策略
+            const searchQueries = [
+                safeTitle,
+                `${safeTitle} information`,
+                `${safeTitle} facts`,
+                `${safeTitle} details`,
+                `${safeTitle} guide`,
+                `${safeTitle} tutorial`,
+                `${safeTitle} tips`,
+                `${safeTitle} help`,
+                `${safeTitle} how to`,
+                `${safeTitle} what is`
+            ];
+            
+            // 随机选择一个查询
+            const randomIndex = Math.floor(Math.random() * searchQueries.length);
+            const randomQuery = searchQueries[randomIndex] || safeTitle;
+            this.bot.log(this.bot.isMobile, '搜索查询', `生成搜索查询: ${randomQuery}`);
+            
+            return randomQuery;
+            
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '搜索查询', `生成搜索查询时出错，使用默认查询: ${safeTitle}`, 'warn');
+            return safeTitle;
+        }
+    }
+
+    /**
+     * 尝试关闭所有消息提示
+     */
+    private async tryDismissAllMessages(page: Page): Promise<void> {
+        try {
+            const dismissSelectors = [
+                'button[aria-label="Close"]',
+                'button[aria-label="关闭"]',
+                '.close-button',
+                '.dismiss-button',
+                '[data-testid="close"]',
+                'button:has-text("×")',
+                'button:has-text("Close")',
+                'button:has-text("关闭")'
+            ];
+            
+            for (const selector of dismissSelectors) {
+                try {
+                    const dismissButton = page.locator(selector);
+                    if (await dismissButton.count() > 0) {
+                        await dismissButton.first().click();
+                        await this.bot.utils.wait(500);
+                    }
+                } catch (e) {
+                    // 忽略单个关闭按钮的错误
+                }
+            }
+        } catch (error) {
+            // 忽略关闭消息提示的错误
+        }
+    }
+
     public async doPunchCard(page: Page, data: DashboardData) {
-        this.bot.log(this.bot.isMobile, '打卡任务', '所有"打卡任务"已完成')
+        try {
+            this.bot.log(this.bot.isMobile, '打卡任务', '开始检查各种任务完成状态...');
+            
+            // 1. 检查每日任务完成状态
+            const todayStr = this.bot.utils.getFormattedDate();
+            const dailyTasks = data.dailySetPromotions[todayStr] || [];
+            const completedDailyTasks = dailyTasks.filter(task => task.complete);
+            const incompleteDailyTasks = dailyTasks.filter(task => !task.complete);
+            
+            if (dailyTasks.length > 0) {
+                this.bot.log(this.bot.isMobile, '打卡任务', `每日任务: 共 ${dailyTasks.length} 个，已完成 ${completedDailyTasks.length} 个，未完成 ${incompleteDailyTasks.length} 个`);
+                
+                if (completedDailyTasks.length > 0) {
+                    const completedTitles = completedDailyTasks.map(task => task.title).join(', ');
+                    this.bot.log(this.bot.isMobile, '打卡任务', `已完成的每日任务: ${completedTitles}`);
+                }
+                
+                if (incompleteDailyTasks.length > 0) {
+                    const incompleteTitles = incompleteDailyTasks.map(task => task.title).join(', ');
+                    this.bot.log(this.bot.isMobile, '打卡任务', `未完成的每日任务: ${incompleteTitles}`);
+                }
+            } else {
+                this.bot.log(this.bot.isMobile, '打卡任务', '今日暂无每日任务');
+            }
+            
+            // 2. 检查更多促销活动完成状态
+            const morePromotions = data.morePromotions || [];
+            const completedMorePromotions = morePromotions.filter(task => task.complete);
+            const incompleteMorePromotions = morePromotions.filter(task => !task.complete);
+            
+            if (morePromotions.length > 0) {
+                this.bot.log(this.bot.isMobile, '打卡任务', `更多促销活动: 共 ${morePromotions.length} 个，已完成 ${completedMorePromotions.length} 个，未完成 ${incompleteMorePromotions.length} 个`);
+                
+                if (completedMorePromotions.length > 0) {
+                    const completedTitles = completedMorePromotions.map(task => task.title).join(', ');
+                    this.bot.log(this.bot.isMobile, '打卡任务', `已完成的促销活动: ${completedTitles}`);
+                }
+                
+                if (incompleteMorePromotions.length > 0) {
+                    const incompleteTitles = incompleteMorePromotions.map(task => task.title).join(', ');
+                    this.bot.log(this.bot.isMobile, '打卡任务', `未完成的促销活动: ${incompleteTitles}`);
+                }
+            } else {
+                this.bot.log(this.bot.isMobile, '打卡任务', '暂无更多促销活动');
+            }
+            
+            // 3. 检查促销项目完成状态
+            if (data.promotionalItem) {
+                const promotionalItem = data.promotionalItem;
+                if (promotionalItem.complete) {
+                    this.bot.log(this.bot.isMobile, '打卡任务', `促销项目 "${promotionalItem.title}" 已完成`);
+                } else {
+                    this.bot.log(this.bot.isMobile, '打卡任务', `促销项目 "${promotionalItem.title}" 未完成 (进度: ${promotionalItem.pointProgress}/${promotionalItem.pointProgressMax})`);
+                }
+            } else {
+                this.bot.log(this.bot.isMobile, '打卡任务', '暂无促销项目');
+            }
+            
+            // 4. 检查搜索任务完成状态
+            const pcSearch = data.userStatus.counters.pcSearch || [];
+            const mobileSearch = data.userStatus.counters.mobileSearch || [];
+            
+            if (pcSearch.length > 0) {
+                const completedPcSearch = pcSearch.filter(task => task.complete);
+                const incompletePcSearch = pcSearch.filter(task => !task.complete);
+                this.bot.log(this.bot.isMobile, '打卡任务', `桌面搜索任务: 共 ${pcSearch.length} 个，已完成 ${completedPcSearch.length} 个，未完成 ${incompletePcSearch.length} 个`);
+            }
+            
+            if (mobileSearch.length > 0) {
+                const completedMobileSearch = mobileSearch.filter(task => task.complete);
+                const incompleteMobileSearch = mobileSearch.filter(task => !task.complete);
+                this.bot.log(this.bot.isMobile, '打卡任务', `移动搜索任务: 共 ${mobileSearch.length} 个，已完成 ${completedMobileSearch.length} 个，未完成 ${incompleteMobileSearch.length} 个`);
+            }
+            
+            // 5. 检查活动与测验完成状态
+            const activityAndQuiz = data.userStatus.counters.activityAndQuiz || [];
+            const completedActivityAndQuiz = activityAndQuiz.filter(task => task.complete);
+            const incompleteActivityAndQuiz = activityAndQuiz.filter(task => !task.complete);
+            
+            if (activityAndQuiz.length > 0) {
+                this.bot.log(this.bot.isMobile, '打卡任务', `活动与测验: 共 ${activityAndQuiz.length} 个，已完成 ${completedActivityAndQuiz.length} 个，未完成 ${incompleteActivityAndQuiz.length} 个`);
+                
+                if (completedActivityAndQuiz.length > 0) {
+                    const completedTitles = completedActivityAndQuiz.map(task => task.title).join(', ');
+                    this.bot.log(this.bot.isMobile, '打卡任务', `已完成的活动与测验: ${completedTitles}`);
+                }
+                
+                if (incompleteActivityAndQuiz.length > 0) {
+                    const incompleteTitles = incompleteActivityAndQuiz.map(task => task.title).join(', ');
+                    this.bot.log(this.bot.isMobile, '打卡任务', `未完成的活动与测验: ${incompleteTitles}`);
+                }
+            } else {
+                this.bot.log(this.bot.isMobile, '打卡任务', '暂无活动与测验');
+            }
+            
+            // 6. 总结
+            const totalTasks = dailyTasks.length + morePromotions.length + (data.promotionalItem ? 1 : 0) + pcSearch.length + mobileSearch.length + activityAndQuiz.length;
+            const totalCompleted = completedDailyTasks.length + completedMorePromotions.length + (data.promotionalItem?.complete ? 1 : 0) + 
+                                 pcSearch.filter(task => task.complete).length + mobileSearch.filter(task => task.complete).length + completedActivityAndQuiz.length;
+            
+            this.bot.log(this.bot.isMobile, '打卡任务', `任务总结: 总计 ${totalTasks} 个任务，已完成 ${totalCompleted} 个，完成率 ${Math.round((totalCompleted / totalTasks) * 100)}%`);
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '打卡任务', `检查任务完成状态时出错: ${errorMessage}`, 'error');
+        }
     }
 }

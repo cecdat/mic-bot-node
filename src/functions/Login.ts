@@ -19,9 +19,33 @@ export const LoginStatusCode = {
 
 export class Login {
     private bot: MicrosoftRewardsBot
+    private lastLoginStatus: Map<string, { status: boolean; code: number; message: string; timestamp: number }> = new Map()
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
+    }
+
+    /**
+     * 智能发送登录状态更新，避免重复推送
+     */
+    private async sendSmartStatusUpdate(platformType: 'pc' | 'mobile', status: boolean, code: number, message: string, email: string): Promise<void> {
+        const key = `${email}_${platformType}`;
+        const now = Date.now();
+        const lastStatus = this.lastLoginStatus.get(key);
+        
+        // 如果状态没有变化，且距离上次推送不到5分钟，则跳过推送
+        if (lastStatus && 
+            lastStatus.status === status && 
+            lastStatus.code === code && 
+            lastStatus.message === message &&
+            (now - lastStatus.timestamp) < 5 * 60 * 1000) { // 5分钟
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 状态未变化，跳过重复推送`);
+            return;
+        }
+        
+        // 更新缓存并发送推送
+        this.lastLoginStatus.set(key, { status, code, message, timestamp: now });
+        await this.bot.sendStatusUpdate(platformType, status, code, message);
     }
 
     private async gotoWithRetry(page: Page, url: string, retries = 3) {
@@ -89,9 +113,14 @@ export class Login {
 
     private async checkLoggedInStatus(page: Page, email: string): Promise<boolean> {
         try {
+            // 等待页面完全加载
+            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+            
             // 检查当前URL
             const currentUrl = page.url();
             const title = await page.title();
+            
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检查登录状态 - URL: ${currentUrl}, 标题: ${title}`);
             
             // 如果已经在rewards.bing.com且标题包含Microsoft Rewards，说明已登录
             if (currentUrl.includes('rewards.bing.com') && title.includes('Microsoft Rewards')) {
@@ -99,20 +128,55 @@ export class Login {
                 return true;
             }
 
-            // 检查是否有登录状态的DOM元素
-            const isLoggedIn = await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 5000 }).then(() => true).catch(() => false);
-            if (isLoggedIn) {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到RewardsPortal元素，已登录`);
-                return true;
+            // 检查是否有登录状态的DOM元素 - 增加更多检查条件
+            const loginIndicators = [
+                'html[data-role-name="RewardsPortal"]',
+                '[data-testid="user-avatar"]',
+                '.user-avatar',
+                '[aria-label*="账户"]',
+                '[id*="mectrl"]',
+                '[class*="profile"]',
+                'a[href*="Signout"]',
+                'a:has-text("注销")',
+                'a:has-text("Sign out")'
+            ];
+
+            for (const selector of loginIndicators) {
+                try {
+                    const element = await page.waitForSelector(selector, { timeout: 2000 });
+                    if (element) {
+                        this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到登录指示器: ${selector}，已登录`);
+                        return true;
+                    }
+                } catch (error) {
+                    // 继续检查下一个选择器
+                    continue;
+                }
             }
 
-            // 检查是否有用户头像或登录状态指示器
-            const hasUserAvatar = await page.waitForSelector('[data-testid="user-avatar"], .user-avatar, [aria-label*="账户"]', { timeout: 3000 }).then(() => true).catch(() => false);
-            if (hasUserAvatar) {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到用户头像，已登录`);
-                return true;
+            // 检查页面是否包含用户邮箱信息
+            try {
+                const userEmailElements = await page.$$('text=@outlook.com, text=@hotmail.com, text=@gmail.com, text=@live.com');
+                if (userEmailElements.length > 0) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到用户邮箱信息，已登录`);
+                    return true;
+                }
+            } catch (error) {
+                // 忽略错误
             }
 
+            // 最后检查：如果页面包含"登录"按钮，说明未登录
+            try {
+                const loginButton = await page.waitForSelector('a[href*="login"], button:has-text("登录"), button:has-text("Sign in")', { timeout: 2000 });
+                if (loginButton) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到登录按钮，未登录`);
+                    return false;
+                }
+            } catch (error) {
+                // 没有找到登录按钮，可能已登录
+            }
+
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 登录状态检查完成，未找到明确的登录指示器`);
             return false;
         } catch (error) {
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 检查登录状态时出错: ${error}`, 'warn');
@@ -129,7 +193,7 @@ export class Login {
             const sessionValid = await this.checkSessionValidity(page, email);
             if (sessionValid) {
                 this.bot.log(this.bot.isMobile, '登录', `[${email}] 本地会话有效，跳过登录流程`);
-                await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '会话有效');
+                await this.sendSmartStatusUpdate(platformType, true, LoginStatusCode.Success, '会话有效', email);
                 await this.checkAccountLocked(page, email);
                 await saveSessionData(this.bot.config.sessionPath, page.context(), email, this.bot.isMobile);
                 return;
@@ -151,13 +215,54 @@ export class Login {
             const isLoggedIn = await this.checkLoggedInStatus(page, email);
             if (isLoggedIn) {
                 this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到已登录状态，跳过登录流程`);
-                await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '已登录');
+                await this.sendSmartStatusUpdate(platformType, true, LoginStatusCode.Success, '已登录', email);
                 await this.checkAccountLocked(page, email);
             } else {
                 await this.execLogin(page, email, password);
             }
             
             await saveSessionData(this.bot.config.sessionPath, page.context(), email, this.bot.isMobile);
+            
+            // 登录成功后，访问Microsoft Rewards主页并截图
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 登录成功，正在访问Microsoft Rewards主页...`);
+            await this.gotoWithRetry(page, 'https://rewards.bing.com');
+            await page.waitForLoadState('domcontentloaded').catch(() => { });
+            
+            // 等待页面完全加载
+            await this.bot.utils.wait(3000);
+            
+            // 处理cookies授权弹窗（在Microsoft Rewards页面出现）
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 正在处理Microsoft Rewards页面的cookies授权弹窗...`);
+            await this.handleCookiesConsent(page);
+            
+            // 再次等待确保cookies弹窗处理完成
+            await this.bot.utils.wait(2000);
+            
+            // 检查是否是生物识别页面
+            try {
+                // 直接创建 LoginExceptionHandler 实例
+                const { LoginExceptionHandler } = await import('../handlers/LoginExceptionHandler');
+                const loginHandler = new LoginExceptionHandler(this.bot);
+                await loginHandler.initialize();
+                
+                const biometricHandled = await loginHandler.handleBiometricPage(page, email);
+                if (biometricHandled) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 已处理生物识别页面，等待页面跳转...`);
+                    await this.bot.utils.wait(3000);
+                    await page.waitForLoadState('networkidle', { timeout: 10000 });
+                }
+                
+                await loginHandler.cleanup();
+            } catch (biometricError) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 处理生物识别页面时出错: ${biometricError}`, 'warn');
+            }
+            
+            // 截图：登录成功后的Microsoft Rewards主页（受 snapshots.login 开关控制）
+            if (this.bot.config.snapshots?.login) {
+                await this.saveSnapshot(page, email, `rewards_homepage_after_login_${Date.now()}.html`);
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 已保存登录成功后的Microsoft Rewards主页快照`);
+            }
+            
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 登录流程成功，并已保存登录会话！`);
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -167,7 +272,7 @@ export class Login {
             if (errorMessage.includes('密码不正确')) code = LoginStatusCode.PasswordError;
             if (errorMessage.includes('此账户已被锁定')) code = LoginStatusCode.Locked;
             
-            await this.bot.sendStatusUpdate(platformType, false, code, errorMessage);
+            await this.sendSmartStatusUpdate(platformType, false, code, errorMessage, email);
             throw new Error(errorMessage);
         }
     }
@@ -179,7 +284,8 @@ export class Login {
             const isAlreadyLoggedIn = await this.checkLoggedInStatus(page, email);
             if (isAlreadyLoggedIn) {
                 this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到已登录状态，跳过登录流程`);
-                await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '已登录');
+                // 只有在明确需要状态更新时才发送推送，避免重复推送
+                await this.sendSmartStatusUpdate(platformType, true, LoginStatusCode.Success, '已登录', email);
                 return;
             }
 
@@ -196,7 +302,7 @@ export class Login {
             const isLoggedInAfterEmail = await this.checkLoggedInStatus(page, email);
             if (isLoggedInAfterEmail) {
                 this.bot.log(this.bot.isMobile, '登录', `[${email}] 邮箱输入后检测到已登录状态，跳过密码输入`);
-                await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '已登录');
+                await this.sendSmartStatusUpdate(platformType, true, LoginStatusCode.Success, '已登录', email);
                 return;
             }
 
@@ -311,22 +417,20 @@ export class Login {
                     currentUrl.includes('bing.com') ||
                     currentUrl.includes('microsoft.com')) {
                     this.bot.log(this.bot.isMobile, '登录', `[${email}] 验证码处理后已成功登录，跳过密码输入步骤`);
-                    await this.checkLoggedIn(page, email);
-                    await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '验证码登录成功');
-                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 通过验证码成功登录到微软账户`);
-                    return;
+                    // 抛出特殊异常，表示验证码登录成功
+                    throw new Error('VERIFICATION_LOGIN_SUCCESS');
                 }
             }
             
             // 如果验证码处理失败或未处理，继续正常的密码输入流程
-            await this.enterPassword(page, password);
+            await this.enterPassword(page, password, email);
             // 截图：密码输入后页面
             if (this.bot.config.snapshots?.login) {
                 await this.saveSnapshot(page, email, `password_entered_page_${Date.now()}.html`);
             }
             
             await this.checkLoggedIn(page, email);
-            await this.bot.sendStatusUpdate(platformType, true, LoginStatusCode.Success, '登录成功');
+            await this.sendSmartStatusUpdate(platformType, true, LoginStatusCode.Success, '登录成功', email);
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功登录到微软账户`);
         } catch (error) {
             throw error;
@@ -367,7 +471,7 @@ export class Login {
                     }
                 }
             } else {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 输入邮箱后未找到“下一步”按钮`, 'warn');
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 输入邮箱后未找到"下一步"按钮`, 'warn');
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -375,7 +479,7 @@ export class Login {
         }
     }
 
-    private async enterPassword(page: Page, password: string) {
+    private async enterPassword(page: Page, password: string, email: string) {
         const passwordInputSelector = 'input[type="password"]'
         const skip2FASelector = '#idA_PWD_SwitchToPassword'; 
         try {
@@ -426,7 +530,7 @@ export class Login {
             const passwordField = await page.waitForSelector(passwordInputSelector, { state: 'visible', timeout: 5000 }).catch(() => null);
             if (!passwordField) {
                 this.bot.log(this.bot.isMobile, '登录', '未找到密码输入框，可能需要2FA验证。', 'warn');
-                await this.handle2FA(page);
+                await this.handle2FA(page, email);
                 return;
             }
             await this.bot.utils.wait(1000);
@@ -437,10 +541,27 @@ export class Login {
             const nextButton = await page.waitForSelector('button[type="submit"]', { timeout: 2000 }).catch(() => null);
             if (nextButton) {
                 await nextButton.click();
-                await this.bot.utils.wait(2000);
+                await this.bot.utils.wait(3000);
                 this.bot.log(this.bot.isMobile, '登录', '密码输入成功');
+                
+                // 密码输入后检查页面异常情况
+                try {
+                    const exceptionResult = await this.bot.detectPageException(page, this.bot.account?.email || 'unknown', 8000);
+                    if (exceptionResult.detected) {
+                        this.bot.log(this.bot.isMobile, '登录', 
+                            `密码输入后检测到页面异常: ${exceptionResult.pageType} - ${exceptionResult.message}`);
+                        
+                        // 如果检测到账户锁定，直接抛出错误
+                        if (exceptionResult.pageType === 'account_locked') {
+                            throw new Error('账户已锁定，无法继续登录');
+                        }
+                    }
+                } catch (exceptionError) {
+                    this.bot.log(this.bot.isMobile, '登录', 
+                        `密码输入后页面异常检测出错: ${exceptionError}`, 'warn');
+                }
             } else {
-                this.bot.log(this.bot.isMobile, '登录', '输入密码后未找到“下一步”按钮', 'warn');
+                this.bot.log(this.bot.isMobile, '登录', '输入密码后未找到"下一步"按钮', 'warn');
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -562,10 +683,10 @@ export class Login {
         }
     }
 
-    private async handle2FA(page: Page) {
+    private async handle2FA(page: Page, email: string) {
         const platformType = this.bot.isMobile ? 'mobile' : 'pc';
         try {
-            await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.AuthorizationRequired, '需要2FA/授权');
+            await this.sendSmartStatusUpdate(platformType, false, LoginStatusCode.AuthorizationRequired, '需要2FA/授权', email);
             const numberToPress = await this.get2FACode(page);
             await this.authAppVerification(page, numberToPress);
         } catch (error) {
@@ -647,39 +768,353 @@ export class Login {
         
         await this.gotoWithRetry(page, authorizeUrl.href);
 
+        // 保存授权页面快照
+        if (this.bot.config.snapshots?.login) {
+            await this.saveSnapshot(page, email, `mobile_auth_page_${Date.now()}.html`);
+        }
+
         let currentUrl = new URL(page.url());
         let code: string;
         this.bot.log(this.bot.isMobile, '登录-APP', '等待授权...');
+        
+        // 添加超时机制，避免无限等待
+        const startTime = Date.now();
+        const timeoutMs = 120000; // 2分钟超时
+        
         while (true) {
-            if (currentUrl.hostname === 'login.live.com' && currentUrl.pathname === '/oauth20_desktop.srf') {
-                code = currentUrl.searchParams.get('code')!;
-                break;
+            // 检查超时
+            if (Date.now() - startTime > timeoutMs) {
+                // 超时时保存页面快照
+                if (this.bot.config.snapshots?.login) {
+                    await this.saveSnapshot(page, email, `mobile_auth_timeout_${Date.now()}.html`);
+                }
+                throw new Error('移动端授权等待超时，请在2分钟内完成授权操作');
             }
-            await this.bot.utils.wait(5000);
+            
             currentUrl = new URL(page.url());
+            
+            // 检查是否已获得授权码
+            if (currentUrl.hostname === 'login.live.com' && currentUrl.pathname === '/oauth20_desktop.srf') {
+                const authCode = currentUrl.searchParams.get('code');
+                if (authCode) {
+                    code = authCode;
+                    this.bot.log(this.bot.isMobile, '登录-APP', '成功获取授权码');
+                    break;
+                }
+            }
+            
+            // 检查是否有错误
+            const error = currentUrl.searchParams.get('error');
+            if (error) {
+                const errorDescription = currentUrl.searchParams.get('error_description') || '未知错误';
+                // 保存错误页面快照
+                if (this.bot.config.snapshots?.login) {
+                    await this.saveSnapshot(page, email, `mobile_auth_error_${Date.now()}.html`);
+                }
+                throw new Error(`移动端授权失败: ${error} - ${errorDescription}`);
+            }
+            
+            // 每30秒保存一次页面快照，用于调试
+            if (this.bot.config.snapshots?.login && (Date.now() - startTime) % 30000 < 5000) {
+                await this.saveSnapshot(page, email, `mobile_auth_waiting_${Date.now()}.html`);
+            }
+            
+            // 持续检查并处理页面异常情况（生物识别、验证等）
+            try {
+                this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 正在检测页面状态...`);
+                const exceptionResult = await this.bot.detectPageException(page, email, 5000);
+                
+                if (exceptionResult.detected) {
+                    this.bot.log(this.bot.isMobile, '登录-APP', 
+                        `[${email}] 检测到页面异常: ${exceptionResult.pageType} - ${exceptionResult.message}`);
+                    
+                    // 根据检测结果执行相应操作
+                    switch (exceptionResult.pageType) {
+                        case 'biometric':
+                            if (exceptionResult.action === 'skip_clicked') {
+                                this.bot.log(this.bot.isMobile, '登录-APP', 
+                                    `[${email}] 生物识别页面已处理，等待页面跳转...`);
+                                // 等待页面跳转后重新检查URL
+                                await this.bot.utils.wait(3000);
+                                continue;
+                            } else if (exceptionResult.action === 'manual_required') {
+                                this.bot.log(this.bot.isMobile, '登录-APP', 
+                                    `[${email}] ${exceptionResult.message}，继续等待授权完成...`, 'warn');
+                            }
+                            break;
+                            
+                        case 'email_verification':
+                            this.bot.log(this.bot.isMobile, '登录-APP', 
+                                `[${email}] 检测到邮箱验证页面，需要手动处理`, 'warn');
+                            break;
+                            
+                        case 'stay_signed_in':
+                            if (exceptionResult.action === 'yes_clicked') {
+                                this.bot.log(this.bot.isMobile, '登录-APP', 
+                                    `[${email}] 登录保持页面已处理，等待页面跳转...`);
+                                await this.bot.utils.wait(3000);
+                                continue;
+                            }
+                            break;
+                            
+                        case 'cookie_consent':
+                            if (exceptionResult.action === 'accept_clicked') {
+                                this.bot.log(this.bot.isMobile, '登录-APP', 
+                                    `[${email}] Cookie同意页面已处理，等待页面跳转...`);
+                                await this.bot.utils.wait(2000);
+                                continue;
+                            }
+                            break;
+                            
+                        case 'account_locked':
+                            throw new Error('账户已锁定，无法继续登录');
+                            
+                        case 'two_factor':
+                            this.bot.log(this.bot.isMobile, '登录-APP', 
+                                `[${email}] 检测到两步验证页面，需要手动处理`, 'warn');
+                            break;
+                            
+                        case 'network_error':
+                            this.bot.log(this.bot.isMobile, '登录-APP', 
+                                `[${email}] 检测到网络错误，建议重试`, 'warn');
+                            break;
+                            
+                        default:
+                            this.bot.log(this.bot.isMobile, '登录-APP', 
+                                `[${email}] 检测到未知页面异常: ${exceptionResult.pageType}`, 'warn');
+                    }
+                } else {
+                    this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 页面状态正常，继续等待授权...`);
+                }
+            } catch (exceptionError) {
+                this.bot.log(this.bot.isMobile, '登录-APP', 
+                    `[${email}] 页面异常检测出错: ${exceptionError}`, 'warn');
+            }
+            
+            // 检查页面是否已经跳转（可能通过其他方式完成授权）
+            const newUrl = page.url();
+            if (newUrl !== currentUrl.href) {
+                this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 检测到页面URL变化: ${currentUrl.href} -> ${newUrl}`);
+                currentUrl = new URL(newUrl);
+                
+                // 如果跳转到了授权成功页面，重新检查授权码
+                if (currentUrl.hostname === 'login.live.com' && currentUrl.pathname === '/oauth20_desktop.srf') {
+                    const authCode = currentUrl.searchParams.get('code');
+                    if (authCode) {
+                        code = authCode;
+                        this.bot.log(this.bot.isMobile, '登录-APP', '页面跳转后成功获取授权码');
+                        break;
+                    }
+                }
+            }
+            
+            await this.bot.utils.wait(3000); // 减少等待时间，提高响应速度
         }
-        const body = new URLSearchParams();
-        body.append('grant_type', 'authorization_code');
-        body.append('client_id', '0000000040170455');
-        body.append('code', code);
-        body.append('redirect_uri', 'https://login.live.com/oauth20_desktop.srf');
-        const tokenRequest: AxiosRequestConfig = {
-            url: 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token',
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            data: body.toString()
-        };
-        const tokenResponse = await this.bot.axios.request(tokenRequest);
-        const tokenData: OAuth = await tokenResponse.data;
-        this.bot.log(this.bot.isMobile, '登录-APP', '授权成功');
-        return tokenData.access_token;
+        
+        // 使用授权码获取访问令牌
+        try {
+            // 确保code不为null
+            if (!code) {
+                throw new Error('未能获取有效的授权码');
+            }
+            
+            // 类型断言，确保code是string类型
+            const authCode: string = code;
+            
+            const body = new URLSearchParams();
+            body.append('grant_type', 'authorization_code');
+            body.append('client_id', '0000000040170455');
+            body.append('code', authCode);
+            body.append('redirect_uri', 'https://login.live.com/oauth20_desktop.srf');
+            
+            const tokenRequest: AxiosRequestConfig = {
+                url: 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token',
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                data: body.toString()
+            };
+            
+            const tokenResponse = await this.bot.axios.request(tokenRequest);
+            const tokenData: OAuth = await tokenResponse.data;
+            this.bot.log(this.bot.isMobile, '登录-APP', '授权成功，已获取访问令牌');
+            
+            // 授权成功后，检查并处理cookies同意弹窗
+            try {
+                this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 授权成功后，检查cookies同意弹窗...`);
+                
+                // 等待页面加载完成
+                await this.bot.utils.wait(2000);
+                
+                // 检查是否有cookies同意弹窗
+                const cookiesResult = await this.bot.detectPageException(page, email, 5000);
+                if (cookiesResult.detected && cookiesResult.pageType === 'cookie_consent') {
+                    this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 检测到cookies同意弹窗，已自动处理`);
+                } else {
+                    this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 未检测到cookies同意弹窗或已处理`);
+                }
+            } catch (cookiesError) {
+                this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 检查cookies同意弹窗时出错: ${cookiesError}`, 'warn');
+            }
+            
+            return tokenData.access_token;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '登录-APP', `获取访问令牌失败: ${errorMessage}`, 'error');
+            throw new Error(`获取移动端访问令牌失败: ${errorMessage}`);
+        }
+    }
+
+    /**
+     * @deprecated 此方法已被 PageExceptionDetector 替换，将在未来的版本中删除。
+     * 处理生物识别页面（人脸/指纹/PIN）
+     */
+    public async handleBiometricPage(page: Page, email: string): Promise<void> {
+        try {
+            // 检查页面标题和内容，识别生物识别页面
+            const pageTitle = await page.title();
+            const pageText = await page.textContent('body');
+            
+            // 根据实际快照文件更新识别条件
+            const isBiometricPage = pageTitle.includes('使用人脸、指纹或 PIN') || 
+                                   pageTitle.includes('使用人脸') || 
+                                   pageTitle.includes('指纹') || 
+                                   pageTitle.includes('PIN') ||
+                                   pageTitle.includes('通行密钥') ||
+                                   (pageText && (pageText.includes('使用人脸、指纹或 PIN') ||
+                                                pageText.includes('使用人脸') || 
+                                                pageText.includes('指纹') || 
+                                                pageText.includes('PIN') ||
+                                                pageText.includes('生物识别') ||
+                                                pageText.includes('通行密钥') ||
+                                                pageText.includes('创建通行密钥')));
+            
+            if (isBiometricPage) {
+                this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 检测到生物识别页面: "${pageTitle}"，尝试点击"暂时跳过"`);
+                
+                // 保存生物识别页面快照
+                if (this.bot.config.snapshots?.login) {
+                    await this.saveSnapshot(page, email, `mobile_auth_biometric_page_${Date.now()}.html`);
+                }
+                
+                // 尝试多种方式查找"暂时跳过"按钮
+                let skipClicked = false;
+                
+                // 安全检查：确保不会点击"下一步"按钮
+                try {
+                    const nextButton = page.locator('[data-testid="primaryButton"]');
+                    if (await nextButton.isVisible({ timeout: 1000 })) {
+                        const nextButtonText = await nextButton.textContent();
+                        this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 检测到"下一步"按钮: ${nextButtonText}，将避免点击此按钮`);
+                    }
+                } catch (error) {
+                    // 忽略错误，继续执行
+                }
+                
+                // 方法1：使用data-testid选择器（根据快照文件中的实际按钮）
+                try {
+                    const skipButton = page.locator('[data-testid="secondaryButton"]');
+                    if (await skipButton.isVisible({ timeout: 2000 })) {
+                        const buttonText = await skipButton.textContent();
+                        this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 找到"暂时跳过"按钮: ${buttonText}`);
+                        await skipButton.scrollIntoViewIfNeeded();
+                        await skipButton.click({ timeout: 5000 });
+                        skipClicked = true;
+                        this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 成功点击"暂时跳过"按钮`);
+                        await this.bot.utils.wait(3000); // 等待页面跳转
+                    }
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 方法1失败: ${error instanceof Error ? error.message : String(error)}`, 'warn');
+                }
+                
+                // 方法2：使用文本选择器查找"暂时跳过"按钮
+                if (!skipClicked) {
+                    const skipButtonSelectors = [
+                        'button:has-text("暂时跳过")',
+                        'button:has-text("Skip for now")',
+                        'a:has-text("暂时跳过")',
+                        'a:has-text("Skip for now")',
+                        '[role="button"]:has-text("暂时跳过")',
+                        '[role="button"]:has-text("Skip for now")',
+                        'span:has-text("暂时跳过")',
+                        'span:has-text("Skip for now")'
+                    ];
+                    
+                    for (const selector of skipButtonSelectors) {
+                        try {
+                            const element = page.locator(selector);
+                            if (await element.isVisible({ timeout: 2000 })) {
+                                this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 找到"暂时跳过"按钮: ${selector}`);
+                                await element.scrollIntoViewIfNeeded();
+                                await element.click({ timeout: 5000 });
+                                skipClicked = true;
+                                this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 成功点击"暂时跳过"按钮`);
+                                await this.bot.utils.wait(3000); // 等待页面跳转
+                                break;
+                            }
+                        } catch (error) {
+                            continue;
+                        }
+                    }
+                }
+                
+                // 方法3：使用JavaScript查找并点击
+                if (!skipClicked) {
+                    try {
+                        this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 尝试使用JavaScript点击"暂时跳过"按钮`);
+                        
+                        const jsResult = await page.evaluate(() => {
+                            // 查找包含"暂时跳过"或"Skip for now"文本的元素
+                            const elements = Array.from(document.querySelectorAll('*')).filter(el => {
+                                const text = el.textContent || '';
+                                return text.includes('暂时跳过') || 
+                                       text.includes('Skip for now') || 
+                                       text.includes('跳过') || 
+                                       text.includes('Skip');
+                            });
+                            
+                            if (elements.length > 0) {
+                                // 尝试点击第一个可见的元素
+                                for (const el of elements) {
+                                    const htmlEl = el as HTMLElement;
+                                    if (htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0) {
+                                        htmlEl.click();
+                                        return { success: true, element: htmlEl.tagName, text: htmlEl.textContent };
+                                    }
+                                }
+                            }
+                            return { success: false, reason: 'No visible elements found' };
+                        });
+                        
+                        if (jsResult.success) {
+                            skipClicked = true;
+                            this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] JavaScript点击"暂时跳过"成功: ${jsResult.element} - ${jsResult.text}`);
+                            await this.bot.utils.wait(3000); // 等待页面跳转
+                        } else {
+                            this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] JavaScript点击"暂时跳过"失败: ${jsResult.reason}`, 'warn');
+                        }
+                    } catch (error) {
+                        const errorMessage = error instanceof Error ? error.message : String(error);
+                        this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] JavaScript点击"暂时跳过"异常: ${errorMessage}`, 'warn');
+                    }
+                }
+                
+                if (skipClicked) {
+                    this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 已处理生物识别页面，等待继续授权流程`);
+                } else {
+                    this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 无法找到"暂时跳过"按钮，可能需要手动操作`, 'warn');
+                }
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '登录-APP', `[${email}] 处理生物识别页面时出错: ${errorMessage}`, 'warn');
+        }
     }
 
     private async checkLoggedIn(page: Page, email: string) {
         this.bot.log(this.bot.isMobile, '登录', `[${email}] 正在验证登录后状态...`);
         try {
             // 增强导航等待逻辑，增加更多成功条件
-            const navigationPromise = page.waitForURL(url => {
+            const navigationPromise = page.waitForURL((url: URL) => {
                 return url.href.includes('rewards.bing.com') || 
                        url.href.includes('bing.com/rewards') || 
                        url.href.includes('login.live.com/oauth20_desktop.srf');
@@ -721,7 +1156,7 @@ export class Login {
         const staySignedInButton = page.locator('[data-testid="primaryButton"]');
         if (await staySignedInButton.isVisible({ timeout: 1000 })) {
             await staySignedInButton.click();
-            this.bot.log(this.bot.isMobile, '关闭消息', `[${email}] 点击了“保持登录状态”弹窗中的“是”`);
+            this.bot.log(this.bot.isMobile, '关闭消息', `[${email}] 点击了"保持登录状态"弹窗中的"是"`);
             await page.waitForTimeout(500);
         }
         
@@ -770,7 +1205,7 @@ export class Login {
                 await this.saveSnapshot(page, email, `verify_email_page_${Date.now()}.html`);
             }
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到"验证电子邮件"页面`);
-            await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.VerificationRequired, '需要邮件验证');
+            await this.sendSmartStatusUpdate(platformType, false, LoginStatusCode.VerificationRequired, '需要邮件验证', email);
             
             // 检查是否需要处理辅助邮箱验证码
             const verificationSuccess = await this.handleAuxiliaryEmailVerification(page, email);
@@ -956,7 +1391,7 @@ export class Login {
                 await this.saveSnapshot(page, email, `invalid_password_page_${Date.now()}.html`);
             }
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到密码错误`);
-            await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.PasswordError, '密码不正确');
+            await this.sendSmartStatusUpdate(platformType, false, LoginStatusCode.PasswordError, '密码不正确', email);
             throw new Error(`[${email}] 密码不正确`);
         }
 
@@ -967,8 +1402,8 @@ export class Login {
             if (this.bot.config.snapshots?.login) {
                 await this.saveSnapshot(page, email, `security_verification_page_${Date.now()}.html`);
             }
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到“安全验证”页面`);
-            await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.VerificationRequired, '需要安全验证');
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到"安全验证"页面`);
+            await this.sendSmartStatusUpdate(platformType, false, LoginStatusCode.VerificationRequired, '需要安全验证', email);
             
             // 尝试找到并点击"使用其他方式"链接
             const useOtherMethodLink = page.locator('a:has-text("使用其他方式"), a:has-text("Use another method")');
@@ -985,8 +1420,8 @@ export class Login {
             if (this.bot.config.snapshots?.login) {
                 await this.saveSnapshot(page, email, `account_recovery_page_${Date.now()}.html`);
             }
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到“账户恢复”页面`);
-            await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.Locked, '账户需要恢复');
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到"账户恢复"页面`);
+            await this.sendSmartStatusUpdate(platformType, false, LoginStatusCode.Locked, '账户需要恢复', email);
         }
         
         // 检测是否有验证码输入页面
@@ -997,7 +1432,7 @@ export class Login {
                 await this.saveSnapshot(page, email, `captcha_page_${Date.now()}.html`);
             }
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到验证码页面`);
-            await this.bot.sendStatusUpdate(platformType, false, LoginStatusCode.VerificationRequired, '需要输入验证码');
+            await this.sendSmartStatusUpdate(platformType, false, LoginStatusCode.VerificationRequired, '需要输入验证码', email);
             
             // 在调试模式下保存快照
             if (this.bot.config.debug) {
@@ -1007,6 +1442,11 @@ export class Login {
     }
 
     private async saveSnapshot(page: Page, email: string, filename: string) {
+        // 根据配置决定是否保存快照
+        if (!this.bot.config.snapshots?.login) {
+            return;
+        }
+        
         // 提取文件名（不含扩展名）
         const baseFilename = filename.replace(/\.html$/, '');
         
@@ -1016,7 +1456,20 @@ export class Login {
         
         this.bot.log(this.bot.isMobile, '调试模式', `[${email}] 正在保存页面快照...`, 'warn');
         try {
+
+            // 等待页面完全加载
+            await this.bot.utils.wait(3000);
+            
+            // 等待页面网络空闲，确保内容完全加载
+            try {
+                await page.waitForLoadState('networkidle', { timeout: 10000 });
+            } catch (error) {
+                this.bot.log(this.bot.isMobile, '调试模式', `等待页面网络空闲超时，继续保存快照`, 'warn');
+            }
+            
+            // 再次等待确保DOM完全渲染
             await this.bot.utils.wait(2000);
+            
             const sessionDir = path.join(process.cwd(), this.bot.config.sessionPath, email);
             if (!fs.existsSync(sessionDir)) {
                 fs.mkdirSync(sessionDir, { recursive: true });
@@ -1048,6 +1501,216 @@ export class Login {
             const errorMsg = `[${email}] 此账户已被锁定！`;
             this.bot.log(this.bot.isMobile, '检查锁定', errorMsg, 'error');
             throw new Error(errorMsg);
+        }
+    }
+
+    private async handleCookiesConsent(page: Page) {
+        try {
+            this.bot.log(this.bot.isMobile, '登录', '开始检测Microsoft Rewards页面的cookies授权弹窗...');
+            
+            // 等待页面完全加载
+            await this.bot.utils.wait(3000);
+            
+            // 方法1：查找模态弹窗中的"接受"按钮
+            const acceptButtonSelectors = [
+                // 中文按钮
+                'button:has-text("接受")',
+                'button:has-text("同意")',
+                'button:has-text("允许")',
+                'button:has-text("确定")',
+                'button:has-text("是")',
+                'button:has-text("好")',
+                'button:has-text("好的")',
+                
+                // 英文按钮
+                'button:has-text("Accept")',
+                'button:has-text("Accept all")',
+                'button:has-text("Accept All")',
+                'button:has-text("Allow")',
+                'button:has-text("Allow all")',
+                'button:has-text("Allow All")',
+                'button:has-text("I agree")',
+                'button:has-text("I Accept")',
+                'button:has-text("OK")',
+                'button:has-text("Yes")',
+                
+                // 数据属性选择器
+                '[data-testid="accept"]',
+                '[data-testid="accept-all"]',
+                '[data-testid="allow"]',
+                '[data-testid="allow-all"]',
+                '[data-testid="agree"]',
+                '[data-testid="consent-accept"]',
+                '[data-testid="cookie-accept"]',
+                
+                // 类名选择器
+                '.accept',
+                '.accept-all',
+                '.allow',
+                '.allow-all',
+                '.agree',
+                '.consent-accept',
+                '.cookie-accept',
+                '.accept-button',
+                '.allow-button',
+                '.agree-button',
+                
+                // ID选择器
+                '#accept',
+                '#accept-all',
+                '#allow',
+                '#allow-all',
+                '#agree',
+                '#consent-accept',
+                '#cookie-accept',
+                '#accept-button',
+                '#allow-button',
+                '#agree-button'
+            ];
+            
+            let cookiesAccepted = false;
+            
+            // 尝试使用选择器查找"接受"按钮
+            for (const selector of acceptButtonSelectors) {
+                try {
+                    const button = page.locator(selector);
+                    if (await button.count() > 0 && await button.isVisible({ timeout: 2000 })) {
+                        this.bot.log(this.bot.isMobile, '登录', `找到cookies授权"接受"按钮: ${selector}`);
+                        
+                        // 滚动到按钮位置，确保可见
+                        await button.scrollIntoViewIfNeeded();
+                        await this.bot.utils.wait(500);
+                        
+                        // 点击按钮
+                        await button.click({ timeout: 5000 });
+                        this.bot.log(this.bot.isMobile, '登录', '已点击cookies授权"接受"按钮');
+                        cookiesAccepted = true;
+                        await this.bot.utils.wait(2000); // 等待弹窗消失
+                        break;
+                    }
+                } catch (error) {
+                    continue;
+                }
+            }
+            
+            // 方法2：如果选择器方法失败，使用文本搜索方法
+            if (!cookiesAccepted) {
+                this.bot.log(this.bot.isMobile, '登录', '选择器方法未找到按钮，尝试文本搜索方法...');
+                
+                try {
+                    // 查找页面中所有按钮
+                    const allButtons = page.locator('button, input[type="button"], input[type="submit"], a[role="button"]');
+                    const buttonCount = await allButtons.count();
+                    
+                    this.bot.log(this.bot.isMobile, '登录', `页面中共找到 ${buttonCount} 个按钮，正在检查文本内容...`);
+                    
+                    for (let i = 0; i < buttonCount; i++) {
+                        try {
+                            const button = allButtons.nth(i);
+                            
+                            // 检查按钮是否可见
+                            if (!(await button.isVisible({ timeout: 1000 }))) {
+                                continue;
+                            }
+                            
+                            // 获取按钮文本
+                            const buttonText = await button.textContent();
+                            if (!buttonText || buttonText.trim() === '') {
+                                continue;
+                            }
+                            
+                            const buttonTextLower = buttonText.trim().toLowerCase();
+                            
+                            // 检查按钮文本是否包含"接受"、"允许"、"同意"等关键词
+                            if (buttonTextLower.includes('接受') || 
+                                buttonTextLower.includes('允许') || 
+                                buttonTextLower.includes('同意') || 
+                                buttonTextLower.includes('确定') || 
+                                buttonTextLower.includes('是') ||
+                                buttonTextLower.includes('好') ||
+                                buttonTextLower.includes('accept') || 
+                                buttonTextLower.includes('allow') || 
+                                buttonTextLower.includes('agree') || 
+                                buttonTextLower.includes('ok') || 
+                                buttonTextLower.includes('yes')) {
+                                
+                                this.bot.log(this.bot.isMobile, '登录', `通过文本匹配找到可能的cookies授权按钮: "${buttonText}"`);
+                                
+                                // 滚动到按钮位置，确保可见
+                                await button.scrollIntoViewIfNeeded();
+                                await this.bot.utils.wait(500);
+                                
+                                // 点击按钮
+                                await button.click({ timeout: 5000 });
+                                this.bot.log(this.bot.isMobile, '登录', `已点击通过文本匹配找到的按钮: "${buttonText}"`);
+                                cookiesAccepted = true;
+                                await this.bot.utils.wait(2000); // 等待弹窗消失
+                                break;
+                            }
+                        } catch (error) {
+                            continue;
+                        }
+                    }
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, '登录', `文本搜索方法出错: ${error}`, 'warn');
+                }
+            }
+            
+            // 方法3：查找模态弹窗中的任何可点击元素
+            if (!cookiesAccepted) {
+                this.bot.log(this.bot.isMobile, '登录', '前两种方法都失败，尝试查找模态弹窗中的可点击元素...');
+                
+                try {
+                    // 查找包含cookies相关文本的元素
+                    const cookiesElements = page.locator('*:has-text("Cookie"), *:has-text("cookie"), *:has-text("Cookies"), *:has-text("cookies")');
+                    const elementCount = await cookiesElements.count();
+                    
+                    this.bot.log(this.bot.isMobile, '登录', `找到 ${elementCount} 个包含cookies文本的元素`);
+                    
+                    for (let i = 0; i < elementCount; i++) {
+                        try {
+                            const element = cookiesElements.nth(i);
+                            
+                            // 检查元素是否可见
+                            if (!(await element.isVisible({ timeout: 1000 }))) {
+                                continue;
+                            }
+                            
+                            // 检查元素是否可点击
+                            const tagName = await element.evaluate((el: any) => el.tagName.toLowerCase());
+                            if (tagName === 'button' || tagName === 'a' || tagName === 'input') {
+                                const elementText = await element.textContent();
+                                this.bot.log(this.bot.isMobile, '登录', `找到可点击的cookies相关元素: ${tagName}, 文本: "${elementText}"`);
+                                
+                                // 滚动到元素位置，确保可见
+                                await element.scrollIntoViewIfNeeded();
+                                await this.bot.utils.wait(500);
+                                
+                                // 点击元素
+                                await element.click({ timeout: 5000 });
+                                this.bot.log(this.bot.isMobile, '登录', `已点击cookies相关元素`);
+                                cookiesAccepted = true;
+                                await this.bot.utils.wait(2000); // 等待弹窗消失
+                                break;
+                            }
+                        } catch (error) {
+                            continue;
+                        }
+                    }
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, '登录', `查找cookies文本元素方法出错: ${error}`, 'warn');
+                }
+            }
+            
+            if (cookiesAccepted) {
+                this.bot.log(this.bot.isMobile, '登录', 'Microsoft Rewards页面的cookies授权弹窗已成功处理');
+            } else {
+                this.bot.log(this.bot.isMobile, '登录', '未检测到Microsoft Rewards页面的cookies授权弹窗或已处理');
+            }
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '登录', `处理Microsoft Rewards页面的cookies授权弹窗时出错: ${errorMessage}`, 'warn');
         }
     }
 }

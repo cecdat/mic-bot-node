@@ -14,23 +14,41 @@ class Browser {
     }
 
     async launchBrowser(account: Account): Promise<PlaywrightBrowser> {
-        const proxy = account.proxy;
         const browser = await playwright.chromium.launch({
             headless: this.bot.config.headless,
-            ...(proxy.url && { proxy: { username: proxy.username, password: proxy.password, server: `${proxy.url}:${proxy.port}` } }),
             args: [
                 '--no-sandbox',
-                '--mute-audio',
                 '--disable-setuid-sandbox',
-                '--ignore-certificate-errors',
-                '--ignore-certificate-errors-spki-list',
-                '--ignore-ssl-errors',
-                // [新增] 尝试禁用HTTP/2协议，回退到HTTP/1.1，可能会解决协议错误
-                '--disable-http2',
-                // [新增] 禁用GPU硬件加速，可以减少资源占用并避免一些兼容性问题
-                '--disable-gpu'
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--use-fake-ui-for-media-stream',
+                '--use-fake-device-for-media-stream',
+                '--allow-running-insecure-content',
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor',
+                // 移动端特殊参数：模拟Bing客户端
+                ...(this.bot.isMobile ? [
+                    '--user-agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BingApp/1.0"',
+                    '--touch-events=enabled',
+                    '--enable-touch-drag-drop',
+                    '--enable-features=TouchEventFeature',
+                    '--disable-features=TranslateUI',
+                    '--force-device-scale-factor=3',
+                    '--device-scale-factor=3',
+                    '--high-dpi-support=1',
+                    '--force-prefers-reduced-motion',
+                    '--enable-low-end-device-mode'
+                ] : [])
             ]
         });
+        
+        if (this.bot.isMobile) {
+            this.bot.log(this.bot.isMobile, '浏览器', '移动端浏览器已启动，启用Bing客户端模拟模式');
+        }
+        
         return browser;
     }
 
@@ -42,7 +60,7 @@ class Browser {
         const customUserAgent = this.bot.isMobile ? account.userAgents?.mobile : account.userAgents?.desktop;
 
         if (customUserAgent && customUserAgent.trim() !== '') {
-            this.bot.log(this.bot.isMobile, '浏览器', `[${email}] 检测到自定义User-Agent，将使用该配置。`);
+            this.bot.log(this.bot.isMobile, '浏览器', `[${email}] 检测到自定义User-Agent: ${customUserAgent}`);
             fingerprint = new FingerprintGenerator().getFingerprint({
                 devices: this.bot.isMobile ? ['mobile'] : ['desktop'],
                 operatingSystems: this.bot.isMobile ? ['android'] : ['windows'],
@@ -55,11 +73,103 @@ class Browser {
         }
 
         // 设置浏览器语言为中文
-        // 使用 newContextOptions 来设置 locale
+        // 使用 newContextOptions 来设置 locale 和录像选项
+        const newContextOptions: any = {
+            locale: 'zh-CN'
+        };
+
+        // 屏幕录像功能已禁用（根据配置）
+
+        // 根据配置决定是否启用HAR记录
+        if (this.bot.config.recording?.enableHar) {
+            newContextOptions.recordHar = {
+                path: `${this.bot.config.recording.videoDir || 'sessions/task_videos'}/har.json`
+            };
+        }
+
         const context = await newInjectedContext(browser, { 
             fingerprint: fingerprint,
-            newContextOptions: { locale: 'zh-CN' }
+            newContextOptions: newContextOptions
         });
+        
+        // 屏幕录像功能已禁用（根据配置）
+        
+        // 移动端特殊配置：模拟Bing客户端
+        if (this.bot.isMobile) {
+            // 设置移动设备视口
+            await context.addInitScript(() => {
+                // 模拟触摸事件支持
+                Object.defineProperty(navigator, 'maxTouchPoints', {
+                    get: () => 5
+                });
+                
+                // 模拟移动设备特性
+                Object.defineProperty(navigator, 'platform', {
+                    get: () => 'iPhone'
+                });
+                
+                // 模拟Bing应用标识
+                Object.defineProperty(navigator, 'appName', {
+                    get: () => 'BingApp'
+                });
+                
+                // 模拟触摸事件
+                if (typeof TouchEvent === 'undefined') {
+                    (window as any).TouchEvent = class TouchEvent extends Event {
+                        touches: TouchList;
+                        targetTouches: TouchList;
+                        changedTouches: TouchList;
+                        
+                        constructor(type: string, init?: TouchEventInit) {
+                            super(type, init);
+                            this.touches = new TouchList();
+                            this.targetTouches = new TouchList();
+                            this.changedTouches = new TouchList();
+                        }
+                    };
+                }
+                
+                // 模拟TouchList
+                if (typeof TouchList === 'undefined') {
+                    (window as any).TouchList = class TouchList extends Array {
+                        item(index: number): Touch | null {
+                            return this[index] || null;
+                        }
+                    };
+                }
+                
+                // 模拟Touch对象
+                if (typeof Touch === 'undefined') {
+                    (window as any).Touch = class Touch {
+                        identifier: number;
+                        target: EventTarget;
+                        clientX: number;
+                        clientY: number;
+                        pageX: number;
+                        pageY: number;
+                        radiusX: number;
+                        radiusY: number;
+                        rotationAngle: number;
+                        force: number;
+                        
+                        constructor(init: TouchInit) {
+                            this.identifier = init.identifier || 0;
+                            this.target = init.target;
+                            this.clientX = init.clientX || 0;
+                            this.clientY = init.clientY || 0;
+                            this.pageX = init.pageX || 0;
+                            this.pageY = init.pageY || 0;
+                            this.radiusX = init.radiusX || 0;
+                            this.radiusY = init.radiusY || 0;
+                            this.rotationAngle = init.rotationAngle || 0;
+                            this.force = init.force || 0;
+                        }
+                    };
+                }
+            });
+            
+            this.bot.log(this.bot.isMobile, '浏览器', '已启用Bing移动客户端模拟模式');
+        }
 
         context.setDefaultTimeout(this.bot.utils.stringToMs(this.bot.config?.globalTimeout ?? 30000));
         await context.addCookies(sessionData.cookies);
@@ -69,6 +179,7 @@ class Browser {
         }
 
         this.bot.log(this.bot.isMobile, '浏览器', `创建浏览器上下文，User-Agent: "${fingerprint.fingerprint.navigator.userAgent}"`);
+        // 屏幕录像功能已禁用（根据配置）
 
         return context as BrowserContext;
     }

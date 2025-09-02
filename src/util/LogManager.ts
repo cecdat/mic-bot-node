@@ -10,7 +10,9 @@ interface LogEntry {
 
 class LogManager {
     private logs: LogEntry[] = [];
-    private maxLogs: number = 1000; // 最大保存日志条数
+    private maxLogs: number = 5000; // 增加最大保存日志条数
+    private maxLogSize: number = 40 * 1024 * 1024; // 40MB 最大日志大小
+    private currentLogSize: number = 0; // 当前日志大小
     private logIdCounter: number = 0;
     private listeners: ((logEntry: LogEntry) => void)[] = [];
 
@@ -28,11 +30,22 @@ class LogManager {
             pid
         };
 
+        // 估算日志条目大小（JSON字符串长度）
+        const logEntrySize = JSON.stringify(logEntry).length;
+        
+        // 检查是否超过大小限制
+        if (this.currentLogSize + logEntrySize > this.maxLogSize) {
+            this.rotateLogs();
+        }
+
         this.logs.push(logEntry);
+        this.currentLogSize += logEntrySize;
 
         // 保持日志数量在限制范围内
         if (this.logs.length > this.maxLogs) {
-            this.logs = this.logs.slice(-this.maxLogs);
+            this.logs.splice(0, this.logs.length - this.maxLogs);
+            // 重新计算大小
+            this.currentLogSize = this.logs.reduce((size, log) => size + JSON.stringify(log).length, 0);
         }
 
         // 通知所有监听器
@@ -43,6 +56,28 @@ class LogManager {
                 console.error('日志监听器错误:', error);
             }
         });
+    }
+
+    /**
+     * 日志轮转：清理旧日志以保持大小在限制内
+     */
+    private rotateLogs(): void {
+        // 清理最旧的日志，直到大小低于限制的80%
+        const targetSize = this.maxLogSize * 0.8;
+        
+        while (this.currentLogSize > targetSize && this.logs.length > 0) {
+            const removedLog = this.logs.shift();
+            if (removedLog) {
+                this.currentLogSize -= JSON.stringify(removedLog).length;
+            }
+        }
+    }
+
+    /**
+     * 获取当前日志大小（MB）
+     */
+    getCurrentLogSizeMB(): number {
+        return Math.round(this.currentLogSize / (1024 * 1024) * 100) / 100;
     }
 
     /**
@@ -96,28 +131,17 @@ class LogManager {
     clearLogs(): void {
         this.logs = [];
         this.logIdCounter = 0;
+        this.currentLogSize = 0; // 清空当前日志大小
     }
 
     /**
      * 获取日志统计信息
      */
-    getLogStats(): {
-        total: number;
-        byLevel: { log: number; warn: number; error: number };
-        byPlatform: { [key: string]: number };
-    } {
-        const byLevel = { log: 0, warn: 0, error: 0 };
-        const byPlatform: { [key: string]: number } = {};
-
-        this.logs.forEach(log => {
-            byLevel[log.level]++;
-            byPlatform[log.platform] = (byPlatform[log.platform] || 0) + 1;
-        });
-
+    getLogStats(): { totalLogs: number; currentSizeMB: number; maxSizeMB: number } {
         return {
-            total: this.logs.length,
-            byLevel,
-            byPlatform
+            totalLogs: this.logs.length,
+            currentSizeMB: this.getCurrentLogSizeMB(),
+            maxSizeMB: Math.round(this.maxLogSize / (1024 * 1024))
         };
     }
 

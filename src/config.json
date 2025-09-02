@@ -4,7 +4,7 @@
     "headless": true,
     "parallel": false,
     "runOnZeroPoints": false,
-    "debug": true,
+    "debug": false,
     "snapshots": {
         "login": false,
         "taskExecution": false
@@ -18,6 +18,15 @@
     "saveFingerprint": {
         "mobile": false,
         "desktop": false
+    },
+    "recording": {
+        "enableVideo": false,
+        "enableHar": false,
+        "videoDir": "sessions/task_videos",
+        "videoSize": {
+            "width": 1280,
+            "height": 720
+        }
     },
     "workers": {
         "doDailySet": true,
@@ -33,9 +42,9 @@
     "navigationTimeout": "120s",
     "apiServer": {
         "enabled": true,
-        "updateUrl": "http://10.52.175.75:2002/",
-        "token":"d756432a356ce9aad23c5e38eecdb825a1b9b20a252f7077",
-        "nodeName": "localhost",
+        "updateUrl": "https://bot.237890.xyz/",
+        "token":"05d6dd8a36ae1056b334b9c6e83c0a53f7bf2d0bc21a724b",
+        "nodeName": "SB-Codeing",
         "heartbeatInterval": "2m",
         "heartbeatTimeout": "10m"
     },
@@ -44,9 +53,9 @@
         "baseUrl": "https://hots.237890.xyz"
     },
     "logPush": {
-        "enabled": true,
-        "serverUrl": "http://10.52.175.75:2002/web_api/logs/receive",
-        "token": "d756432a356ce9aad23c5e38eecdb825a1b9b20a252f7077",
+        "enabled": false,
+        "serverUrl": "https://bot.237890.xyz/web_api/logs/receive",
+        "token": "05d6dd8a36ae1056b334b9c6e83c0a53f7bf2d0bc21a724b",
         "interval": 30
     }
 }
