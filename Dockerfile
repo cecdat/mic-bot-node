@@ -1,18 +1,18 @@
 # Stage 1: Builder (compile TypeScript)
-FROM docker.1ms.run/node:18-slim AS builder
+FROM registry.cn-hangzhou.aliyuncs.com/library/node:18-slim AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
 COPY package*.json ./
 # Use npm ci for faster, more reliable builds if package-lock.json exists
-RUN npm install
+RUN npm install --registry=https://registry.npmmirror.com
 
 COPY . .
 RUN npm run build
 
 # Stage 2: Production Runtime
-FROM mcr.microsoft.com/playwright:v1.52.0-jammy
+FROM registry.cn-hangzhou.aliyuncs.com/mcr.microsoft.com/playwright:v1.52.0-jammy
 #FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/mcr.microsoft.com/playwright:v1.52.0-jammy
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -29,7 +29,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Copy only necessary production dependencies from the builder stage
 COPY --from=builder /app/package*.json ./
-RUN npm install --omit=dev
+RUN npm install --omit=dev --registry=https://registry.npmmirror.com
 
 # Copy compiled app and python script from the builder stage
 COPY --from=builder /app/dist ./dist

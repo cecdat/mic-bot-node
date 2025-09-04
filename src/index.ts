@@ -40,6 +40,168 @@ let lastReportedStatus: 'Running' | 'Idle' = 'Idle';
 // 添加WebSocket任务调度支持
 let wsClient: any = null;
 let useWebSocketScheduling = false;
+let globalWebSocketTask: any = null;
+
+// WebSocket客户端类定义
+class NodeWebSocketClient {
+    private config: any;
+    private socket: any = null;
+    private isConnected: boolean = false;
+    private reconnectAttempts: number = 0;
+    private maxReconnectAttempts: number = 3;
+    private reconnectInterval: number = 10000; // 10秒
+
+    constructor(config: any) {
+        this.config = config;
+    }
+
+    /**
+     * 初始化WebSocket连接
+     */
+    init() {
+        if (!this.config.apiServer || !this.config.apiServer.enabled) {
+            log('main', 'WebSocket', 'API服务器未启用，跳过WebSocket连接');
+            return;
+        }
+
+        try {
+            // 动态导入socket.io-client
+            const io = require('socket.io-client');
+            const serverUrl = this.config.apiServer.updateUrl;
+            this.socket = io(serverUrl, {
+                auth: {
+                    token: this.config.apiServer.token,
+                    nodeName: this.config.apiServer.nodeName
+                },
+                transports: ['websocket', 'polling']
+            });
+
+            this.setupEventListeners();
+            log('main', 'WebSocket', '🔌 WebSocket客户端初始化完成');
+        } catch (error) {
+            log('main', 'WebSocket', `❌ WebSocket初始化失败: ${error}`, 'error');
+        }
+    }
+
+    /**
+     * 设置事件监听器
+     */
+    setupEventListeners() {
+        this.socket.on('connect', () => {
+            log('main', 'WebSocket', '✅ WebSocket连接成功');
+            this.isConnected = true;
+            this.reconnectAttempts = 0;
+            this.notifyNodeReady();
+        });
+
+        this.socket.on('disconnect', () => {
+            log('main', 'WebSocket', '❌ WebSocket连接断开');
+            this.isConnected = false;
+            this.scheduleReconnect();
+        });
+
+        this.socket.on('connect_error', (error: any) => {
+            log('main', 'WebSocket', `❌ WebSocket连接错误: ${error}`, 'error');
+            this.scheduleReconnect();
+        });
+
+        this.socket.on('error', (error: any) => {
+            log('main', 'WebSocket', `❌ WebSocket错误: ${error}`, 'error');
+        });
+
+        this.socket.on('node_ready_confirmed', (data: any) => {
+            log('main', 'WebSocket', `✅ 节点准备就绪确认: ${JSON.stringify(data)}`);
+        });
+
+        this.socket.on('new_task', (data: any) => {
+            log('main', 'WebSocket', `📋 收到新任务: ${JSON.stringify(data)}`);
+            // 将任务数据存储到全局变量，让主循环处理
+            globalWebSocketTask = data;
+            this.emitTaskStatusUpdate(data.task_id, 'received', data.node_name);
+        });
+
+        this.socket.on('task_status_broadcast', (data: any) => {
+            log('main', 'WebSocket', `📊 任务状态广播: ${JSON.stringify(data)}`);
+        });
+
+        this.socket.on('task_completed_broadcast', (data: any) => {
+            log('main', 'WebSocket', `✅ 任务完成广播: ${JSON.stringify(data)}`);
+        });
+    }
+
+    /**
+     * 通知节点准备就绪
+     */
+    notifyNodeReady() {
+        if (this.socket && this.isConnected) {
+            this.socket.emit('node_ready', {
+                node_name: this.config.apiServer.nodeName,
+                timestamp: new Date().toISOString()
+            });
+            log('main', 'WebSocket', '📡 已通知服务端节点准备就绪');
+        }
+    }
+
+
+    /**
+     * 发送任务状态更新
+     */
+    emitTaskStatusUpdate(taskId: string, status: string, nodeName: string, result: any = null) {
+        if (this.socket && this.isConnected) {
+            this.socket.emit('task_status_update', {
+                task_id: taskId,
+                status: status,
+                node_name: nodeName,
+                result: result,
+                timestamp: new Date().toISOString()
+            });
+            log('main', 'WebSocket', `📊 已发送任务状态更新: ${taskId} -> ${status}`);
+        }
+    }
+
+    /**
+     * 发送任务完成通知
+     */
+    emitTaskCompleted(taskId: string, nodeName: string, result: any = {}) {
+        if (this.socket && this.isConnected) {
+            this.socket.emit('task_completed', {
+                task_id: taskId,
+                node_name: nodeName,
+                result: result,
+                timestamp: new Date().toISOString()
+            });
+            log('main', 'WebSocket', `✅ 已发送任务完成通知: ${taskId}`);
+        }
+    }
+
+    /**
+     * 安排重连
+     */
+    scheduleReconnect() {
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            log('main', 'WebSocket', `🔄 尝试重连 (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+            
+            setTimeout(() => {
+                this.init();
+            }, this.reconnectInterval);
+        } else {
+            log('main', 'WebSocket', '❌ 达到最大重连次数，停止重连', 'warn');
+        }
+    }
+
+    /**
+     * 销毁连接
+     */
+    destroy() {
+        if (this.socket) {
+            this.socket.disconnect();
+            this.socket = null;
+        }
+        this.isConnected = false;
+        log('main', 'WebSocket', '🔌 WebSocket连接已销毁');
+    }
+}
 
 
 // 在文件开头添加内存监控
@@ -1144,8 +1306,7 @@ async function main() {
         
         // 初始化WebSocket任务调度（可选）
         try {
-            const WebSocketClient = require('./websocket-client.js');
-            wsClient = new WebSocketClient(config);
+            wsClient = new NodeWebSocketClient(config);
             wsClient.init();
             useWebSocketScheduling = true;
             log('main', '启动', '🔌 WebSocket任务调度已启用');
@@ -1348,6 +1509,47 @@ async function main() {
             try {
                 // 更新循环时间戳
                 lastLoopTime = Date.now();
+                
+                // 检查是否有WebSocket任务需要处理
+                if (globalWebSocketTask) {
+                    const task = globalWebSocketTask;
+                    globalWebSocketTask = null; // 清除任务
+                    
+                    log('main', '主流程', `📋 开始处理WebSocket任务: ${task.task_id} (${task.command})`);
+                    
+                    try {
+                        // 更新状态为运行中
+                        if (wsClient) {
+                            wsClient.emitTaskStatusUpdate(task.task_id, 'executing', task.node_name);
+                        }
+                        await updateActivityStatus('Running');
+                        
+                        // 根据命令类型执行相应任务
+                        if (task.command === 'RUN_TASKS') {
+                            await executeTasks();
+                        } else if (task.command === 'RUN_TASK') {
+                            await executeSingleTask(task.command_data);
+                        }
+                        
+                        // 任务完成
+                        if (wsClient) {
+                            wsClient.emitTaskStatusUpdate(task.task_id, 'completed', task.node_name, { success: true });
+                            wsClient.emitTaskCompleted(task.task_id, task.node_name, { success: true });
+                        }
+                        await updateActivityStatus('Idle');
+                        
+                        log('main', '主流程', `✅ WebSocket任务完成: ${task.task_id}`);
+                        
+                    } catch (error) {
+                        const errorMessage = error instanceof Error ? error.message : String(error);
+                        log('main', '主流程', `❌ WebSocket任务执行失败: ${errorMessage}`, 'error');
+                        
+                        if (wsClient) {
+                            wsClient.emitTaskStatusUpdate(task.task_id, 'error', task.node_name, { error: errorMessage });
+                        }
+                        await updateActivityStatus('Idle');
+                    }
+                }
                 
                 // 如果使用WebSocket调度，跳过轮询
                 if (useWebSocketScheduling && wsClient && wsClient.isConnected) {
