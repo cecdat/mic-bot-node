@@ -36,6 +36,9 @@ COPY --from=builder /app/dist ./dist
 COPY get_all_hots.py .
 COPY requirements.txt .
 
+# Create search_terms directory
+RUN mkdir -p /app/dist/search_terms
+
 # Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple/
 

@@ -44,6 +44,8 @@ export interface ConfigSnapshots {
     login: boolean;
     // 任务执行相关快照（HTML/PNG）
     taskExecution?: boolean;
+    // Cookies页面相关快照（HTML）
+    cookies?: boolean;
 }
 
 export interface ConfigDebugOptions {

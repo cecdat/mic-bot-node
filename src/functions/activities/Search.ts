@@ -15,13 +15,13 @@ export class Search extends Workers {
         // 初始化快照工具
         this.snapshotTool = new SearchSnapshot(email);
         
-        this.bot.log(this.bot.isMobile, '搜索-必应', '开始必应搜索')
+        this.bot.log(this.bot.isMobile, '搜索-必应', '🔍 开始必应搜索')
 
         let searchCounters: Counters = data.userStatus.counters;
         let missingPoints = this.calculatePoints(searchCounters)
 
         if (missingPoints === 0) {
-            this.bot.log(this.bot.isMobile, '搜索-必应', '必应搜索任务已完成')
+            this.bot.log(this.bot.isMobile, '搜索-必应', '✅ 必应搜索任务已完成')
             return
         }
 
@@ -32,11 +32,11 @@ export class Search extends Workers {
 
         if (uniqueQueries.length > 0) {
             const requiredSearches = Math.ceil(missingPoints / 3) + 2;
-            this.bot.log(this.bot.isMobile, '搜索-本地词库', `剩余 ${missingPoints} 积分，将从 ${uniqueQueries.length} 个词中随机抽取 ${requiredSearches} 个进行搜索。`);
+            this.bot.log(this.bot.isMobile, '搜索-本地词库', `💰 剩余 ${missingPoints} 积分，将从 ${uniqueQueries.length} 个词中随机抽取 ${requiredSearches} 个进行搜索。`);
             const shuffledQueries = this.bot.utils.shuffleArray(uniqueQueries);
             searchQueries = shuffledQueries.slice(0, requiredSearches);
         } else {
-            this.bot.log(this.bot.isMobile, '搜索-必应', '本地搜索词文件为空或读取失败，将使用默认词条', 'warn');
+            this.bot.log(this.bot.isMobile, '搜索-必应', '⚠️ 本地搜索词文件为空或读取失败，将使用默认词条', 'warn');
             searchQueries = ['天气', '新闻', '电影', '音乐', '游戏', '购物', '旅游', '美食', '体育', '科技', '财经', '汽车', '房产', '教育', '健康'];
         }
         
@@ -51,7 +51,7 @@ export class Search extends Workers {
             
             // 显示详细的积分信息
             if (this.bot.isMobile) {
-                this.bot.log(this.bot.isMobile, '搜索-必应', `剩余 ${missingPoints} 积分 | 查询: ${query}`);
+                this.bot.log(this.bot.isMobile, '搜索-必应', `💰 剩余 ${missingPoints} 积分 | 查询: ${query}`);
             } else {
                 // 桌面端显示更详细的积分信息
                 const searchCounters = await this.bot.browser.func.getDashboardData(page).then(data => data.userStatus.counters);
@@ -82,7 +82,7 @@ export class Search extends Workers {
                 
                 if (newMissingPoints === missingPoints) {
                     maxLoop++;
-                    this.bot.log(this.bot.isMobile, '搜索-必应', `本次搜索未获得积分，连续失败次数: ${maxLoop}/10`, 'warn');
+                    this.bot.log(this.bot.isMobile, '搜索-必应', `⚠️ 本次搜索未获得积分，连续失败次数: ${maxLoop}/10`, 'warn');
                     
                     // 连续失败时也拍快照
                     if (this.bot.isMobile && (maxLoop === 3 || maxLoop === 5)) {
@@ -92,12 +92,12 @@ export class Search extends Workers {
                     // 移动端搜索失败时，增加额外延迟
                     if (this.bot.isMobile && maxLoop > 3) {
                         const extraDelay = Math.min(maxLoop * 2000, 10000); // 最多10秒延迟
-                        this.bot.log(this.bot.isMobile, '搜索-必应', `移动端搜索连续失败，增加延迟 ${extraDelay/1000} 秒`, 'warn');
+                        this.bot.log(this.bot.isMobile, '搜索-必应', `⏰ 移动端搜索连续失败，增加延迟 ${extraDelay/1000} 秒`, 'warn');
                         await this.bot.utils.wait(extraDelay);
                     }
                 } else {
                     maxLoop = 0;
-                    this.bot.log(this.bot.isMobile, '搜索-必应', `搜索成功！积分变化: ${missingPoints} -> ${newMissingPoints}`);
+                    this.bot.log(this.bot.isMobile, '搜索-必应', `🎉 搜索成功！积分变化: ${missingPoints} -> ${newMissingPoints}`);
                     
                     // 搜索成功后也拍快照
                     if (this.bot.isMobile) {
@@ -110,7 +110,7 @@ export class Search extends Workers {
                 
                 // 如果移动端搜索连续失败5次，尝试刷新页面
                 if (this.bot.isMobile && maxLoop === 5) {
-                    this.bot.log(this.bot.isMobile, '搜索-必应', '移动端搜索连续失败5次，尝试刷新页面', 'warn');
+                    this.bot.log(this.bot.isMobile, '搜索-必应', '🔄 移动端搜索连续失败5次，尝试刷新页面', 'warn');
                     try {
                         await page.reload({ waitUntil: 'domcontentloaded' });
                         await this.bot.utils.wait(3000);
@@ -118,13 +118,13 @@ export class Search extends Workers {
                         // 刷新后拍快照
                         await this.takeSearchSnapshot(page, 'after_refresh', query, missingPoints);
                     } catch (refreshError) {
-                        this.bot.log(this.bot.isMobile, '搜索-必应', `页面刷新失败: ${refreshError}`, 'warn');
+                        this.bot.log(this.bot.isMobile, '搜索-必应', `❌ 页面刷新失败: ${refreshError}`, 'warn');
                     }
                 }
                 
             } catch (searchError) {
                 const errorMessage = searchError instanceof Error ? searchError.message : String(searchError);
-                this.bot.log(this.bot.isMobile, '搜索-必应', `搜索执行出错: ${errorMessage}`, 'error');
+                this.bot.log(this.bot.isMobile, '搜索-必应', `💥 搜索执行出错: ${errorMessage}`, 'error');
                 maxLoop++;
                 
                 // 搜索出错时拍快照
@@ -138,10 +138,10 @@ export class Search extends Workers {
         }
 
         if (missingPoints > 0) {
-            this.bot.log(this.bot.isMobile, '搜索-必应', `搜索任务结束，但仍有 ${missingPoints} 积分未获取。可能是因为连续失败次数过多或搜索词已用尽。`, 'warn');
+            this.bot.log(this.bot.isMobile, '搜索-必应', `⚠️ 搜索任务结束，但仍有 ${missingPoints} 积分未获取。可能是因为连续失败次数过多或搜索词已用尽。`, 'warn');
         }
 
-        this.bot.log(this.bot.isMobile, '搜索-必应', '完成搜索任务');
+        this.bot.log(this.bot.isMobile, '搜索-必应', '🏁 完成搜索任务');
     }
 
     private async bingSearch(page: Page, query: string, missingPoints: number): Promise<Counters> {
@@ -159,9 +159,21 @@ export class Search extends Workers {
                 await this.takeSearchSnapshot(page, 'bing_homepage', query, missingPoints);
             }
 
+            // 移动端仿真：在搜索前添加一些随机交互
+            if (this.bot.isMobile) {
+                await this.simulateMobilePreSearchBehavior(page);
+            }
+
             const searchBarSelector = '#sb_form_q';
             await page.waitForSelector(searchBarSelector, { state: 'visible', timeout: 15000 });
-            await page.fill(searchBarSelector, query);
+            
+            // 移动端仿真：模拟真实的输入行为
+            if (this.bot.isMobile) {
+                await this.simulateMobileTyping(page, searchBarSelector, query);
+            } else {
+                await page.fill(searchBarSelector, query);
+            }
+            
             await page.press(searchBarSelector, 'Enter');
 
             const navigationTimeoutMs = this.bot.utils.stringToMs(this.bot.config.navigationTimeout);
@@ -209,41 +221,77 @@ export class Search extends Workers {
             
             const resultPage = await this.bot.browser.utils.getLatestTab(page);
 
-            if (this.bot.config.searchSettings?.scrollRandomResults) {
-                await this.bot.utils.wait(1000);
-                await this.randomScroll(resultPage);
+            // 移动端仿真动作：滚动和点击搜索结果
+            if (this.bot.isMobile) {
+                // 检查是否有搜索结果，如果没有则跳过仿真动作
+                const hasSearchResults = await resultPage.locator('#b_results').isVisible().catch(() => false);
                 
-                // 滚动后快照
-                if (this.bot.isMobile) {
-                    await this.takeSearchSnapshot(page, 'after_scroll', query, 0);
+                if (hasSearchResults) {
+                    // 移动端滚动仿真
+                    if (this.bot.config.searchSettings?.scrollRandomResults) {
+                        await this.bot.utils.wait(1000);
+                        await this.mobileRandomScroll(resultPage);
+                        
+                        // 滚动后快照
+                        await this.takeSearchSnapshot(page, 'after_scroll', query, 0);
+                    }
+                    
+                    // 移动端点击搜索结果仿真
+                    if (this.bot.config.searchSettings?.clickRandomResults) {
+                        await this.bot.utils.wait(1000);
+                        await this.mobileClickRandomLink(resultPage);
+                        
+                        // 点击后快照
+                        await this.takeSearchSnapshot(page, 'after_click', query, 0);
+                    }
+                } else {
+                    this.bot.log(this.bot.isMobile, '搜索-移动端仿真', `[${query}] 未检测到搜索结果，跳过仿真动作`);
+                }
+            } else {
+                // 桌面端保持原有逻辑
+                if (this.bot.config.searchSettings?.scrollRandomResults) {
+                    await this.bot.utils.wait(1000);
+                    await this.randomScroll(resultPage);
+                }
+                if (this.bot.config.searchSettings?.clickRandomResults) {
+                    await this.bot.utils.wait(1000);
+                    await this.clickRandomLink(resultPage);
                 }
             }
-            if (this.bot.config.searchSettings?.clickRandomResults) {
-                await this.bot.utils.wait(1000);
-                await this.clickRandomLink(resultPage);
+
+            // --- 移动端和桌面端不同的延迟策略 ---
+            if (this.bot.isMobile) {
+                // 移动端使用更长的延迟，模拟真实用户行为
+                const mobileMinDelay = this.bot.utils.stringToMs('8s');
+                const mobileMaxDelay = this.bot.utils.stringToMs('20s');
                 
-                // 点击后快照
-                if (this.bot.isMobile) {
-                    await this.takeSearchSnapshot(page, 'after_click', query, 0);
-                }
+                const minDelay = this.bot.config.searchSettings?.searchDelay?.min
+                    ? this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.min)
+                    : mobileMinDelay;
+                
+                const maxDelay = this.bot.config.searchSettings?.searchDelay?.max
+                    ? this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.max)
+                    : mobileMaxDelay;
+
+                const delay = Math.floor(this.bot.utils.randomNumber(minDelay, maxDelay));
+                this.bot.log(this.bot.isMobile, '搜索-移动端延迟', `移动端搜索间隔: ${delay}ms`);
+                await this.bot.utils.wait(delay);
+            } else {
+                // 桌面端保持原有逻辑
+                const defaultMinDelay = this.bot.utils.stringToMs('5s');
+                const defaultMaxDelay = this.bot.utils.stringToMs('15s');
+
+                const minDelay = this.bot.config.searchSettings?.searchDelay?.min
+                    ? this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.min)
+                    : defaultMinDelay;
+                
+                const maxDelay = this.bot.config.searchSettings?.searchDelay?.max
+                    ? this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.max)
+                    : defaultMaxDelay;
+
+                const delay = Math.floor(this.bot.utils.randomNumber(minDelay, maxDelay));
+                await this.bot.utils.wait(delay);
             }
-
-            // --- 这是核心修改部分 ---
-            // 定义安全的默认延迟
-            const defaultMinDelay = this.bot.utils.stringToMs('5s');
-            const defaultMaxDelay = this.bot.utils.stringToMs('15s');
-
-            // 检查配置是否存在，如果不存在则使用默认值
-            const minDelay = this.bot.config.searchSettings?.searchDelay?.min
-                ? this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.min)
-                : defaultMinDelay;
-            
-            const maxDelay = this.bot.config.searchSettings?.searchDelay?.max
-                ? this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.max)
-                : defaultMaxDelay;
-
-            const delay = Math.floor(this.bot.utils.randomNumber(minDelay, maxDelay));
-            await this.bot.utils.wait(delay);
             // --- 修改结束 ---
 
         } catch (error) {
@@ -264,32 +312,46 @@ export class Search extends Workers {
     // [核心修改] getLocalSearchWords 现在能智能加载专属或默认的词库
     private async getLocalSearchWords(email: string): Promise<string[]> {
         // Python脚本现在会把所有搜索词文件输出到 dist/search_terms/ 目录下
+        // 在编译后的代码中，__dirname 指向 dist/functions/activities/，需要回到 dist/ 目录
         const baseDir = path.join(__dirname, '..', '..', 'search_terms');
         const userFilePath = path.join(baseDir, `${email}.txt`);
         const defaultFilePath = path.join(baseDir, 'default.txt');
+        
+        // 添加调试日志
+        this.bot.log(this.bot.isMobile, '搜索-本地词库', `🔍 搜索词目录: ${baseDir}`);
+        this.bot.log(this.bot.isMobile, '搜索-本地词库', `🔍 用户文件路径: ${userFilePath}`);
+        this.bot.log(this.bot.isMobile, '搜索-本地词库', `🔍 默认文件路径: ${defaultFilePath}`);
+        this.bot.log(this.bot.isMobile, '搜索-本地词库', `🔍 目录是否存在: ${fs.existsSync(baseDir)}`);
+        
+        if (fs.existsSync(baseDir)) {
+            const files = fs.readdirSync(baseDir);
+            this.bot.log(this.bot.isMobile, '搜索-本地词库', `🔍 目录中的文件: ${files.join(', ')}`);
+        }
         
         let filePathToUse: string;
 
         if (fs.existsSync(userFilePath)) {
             // 如果存在专属文件，就用它
-            this.bot.log(this.bot.isMobile, '搜索-本地词库', `发现账户 ${email} 的专属搜索词文件，正在加载...`);
+            this.bot.log(this.bot.isMobile, '搜索-本地词库', `✅ 发现账户 ${email} 的专属搜索词文件，正在加载...`);
             filePathToUse = userFilePath;
         } else {
             // 否则，使用通用文件
-            this.bot.log(this.bot.isMobile, '搜索-本地词库', `未找到账户 ${email} 的专属搜索词文件，将使用通用热搜词。`);
+            this.bot.log(this.bot.isMobile, '搜索-本地词库', `⚠️ 未找到账户 ${email} 的专属搜索词文件，将使用通用热搜词。`);
             filePathToUse = defaultFilePath;
         }
 
         try {
             if (!fs.existsSync(filePathToUse)) {
-                this.bot.log(this.bot.isMobile, '搜索-本地词库', `搜索词文件 ${path.basename(filePathToUse)} 不存在`, 'warn');
+                this.bot.log(this.bot.isMobile, '搜索-本地词库', `❌ 搜索词文件 ${path.basename(filePathToUse)} 不存在`, 'warn');
                 return [];
             }
             const fileContent = fs.readFileSync(filePathToUse, 'utf-8');
-            return fileContent.split('\n').map((term: string) => term.trim()).filter((term: string) => term.length > 0);
+            const terms = fileContent.split('\n').map((term: string) => term.trim()).filter((term: string) => term.length > 0);
+            this.bot.log(this.bot.isMobile, '搜索-本地词库', `✅ 成功加载 ${terms.length} 个搜索词`);
+            return terms;
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            this.bot.log(this.bot.isMobile, '搜索-本地词库', `读取搜索词文件时发生错误: ${errorMessage}`, 'error');
+            this.bot.log(this.bot.isMobile, '搜索-本地词库', `❌ 读取搜索词文件时发生错误: ${errorMessage}`, 'error');
             return [];
         }
     }
@@ -345,6 +407,84 @@ export class Search extends Workers {
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.bot.log(this.bot.isMobile, '搜索-随机滚动', `随机滚动失败: ${errorMessage}`, 'warn');
+        }
+    }
+
+    // [新增] 移动端专用滚动仿真方法
+    private async mobileRandomScroll(page: Page) {
+        try {
+            this.bot.log(this.bot.isMobile, '搜索-移动端滚动', '开始执行移动端滚动仿真...');
+            
+            // 获取移动端视口信息
+            const viewportInfo = await page.evaluate(() => {
+                if (!document.body || !document.documentElement) {
+                    return { height: 0, width: 0 };
+                }
+                return {
+                    height: window.innerHeight || document.documentElement.clientHeight || document.body.clientHeight,
+                    width: window.innerWidth || document.documentElement.clientWidth || document.body.clientWidth
+                };
+            });
+
+            if (viewportInfo.height === 0) {
+                this.bot.log(this.bot.isMobile, '搜索-移动端滚动', '无法获取视口信息，跳过滚动', 'warn');
+                return;
+            }
+
+            // 移动端滚动次数：3-6次（比桌面端更多）
+            const scrollCount = Math.floor(Math.random() * 4) + 3;
+            this.bot.log(this.bot.isMobile, '搜索-移动端滚动', `将执行 ${scrollCount} 次移动端滚动`);
+
+            for (let i = 0; i < scrollCount; i++) {
+                // 移动端滚动距离更大，模拟手指滑动
+                const scrollDistance = Math.floor(Math.random() * viewportInfo.height * 0.6) + 200;
+                
+                // 移动端主要向下滚动，偶尔向上
+                const scrollDirection = Math.random() > 0.2 ? 1 : -1;
+                const finalDistance = scrollDirection * scrollDistance;
+                
+                this.bot.log(this.bot.isMobile, '搜索-移动端滚动', `第 ${i + 1} 次滚动: ${scrollDirection > 0 ? '向下' : '向上'} ${scrollDistance}px`);
+                
+                // 使用平滑滚动，模拟移动端触摸滑动
+                await page.evaluate((distance) => {
+                    window.scrollBy({
+                        top: distance,
+                        behavior: 'smooth'
+                    });
+                }, finalDistance);
+                
+                // 移动端滚动间隔更长，模拟真实用户行为
+                const waitTime = Math.random() * 2000 + 1000; // 1-3秒
+                await this.bot.utils.wait(waitTime);
+                
+                // 偶尔添加小幅度的左右滑动（模拟移动端手势）
+                if (Math.random() > 0.7) {
+                    const horizontalDistance = Math.floor(Math.random() * 50) - 25; // -25到25px
+                    await page.evaluate((distance) => {
+                        window.scrollBy({
+                            left: distance,
+                            behavior: 'smooth'
+                        });
+                    }, horizontalDistance);
+                    await this.bot.utils.wait(300);
+                }
+            }
+
+            // 最后滚动回顶部
+            this.bot.log(this.bot.isMobile, '搜索-移动端滚动', '滚动回顶部');
+            await page.evaluate(() => {
+                window.scrollTo({
+                    top: 0,
+                    behavior: 'smooth'
+                });
+            });
+            await this.bot.utils.wait(1500);
+
+            this.bot.log(this.bot.isMobile, '搜索-移动端滚动', '移动端滚动仿真完成');
+
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '搜索-移动端滚动', `移动端滚动失败: ${errorMessage}`, 'warn');
         }
     }
 
@@ -436,6 +576,321 @@ export class Search extends Workers {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.bot.log(this.bot.isMobile, '搜索-随机点击', `发生错误: ${errorMessage}`, 'error');
         }
+    }
+
+    // [新增] 移动端专用点击搜索结果方法
+    private async mobileClickRandomLink(page: Page) {
+        try {
+            this.bot.log(this.bot.isMobile, '搜索-移动端点击', '开始执行移动端点击搜索结果仿真...');
+            
+            // 首先检查是否遇到真人检测页面
+            const hasHumanVerification = await this.checkHumanVerificationPage(page);
+            if (hasHumanVerification) {
+                this.bot.log(this.bot.isMobile, '搜索-移动端点击', '检测到真人检测页面，跳过点击搜索结果');
+                return;
+            }
+            
+            // 查找搜索结果容器
+            const resultsContainer = page.locator('#b_results');
+            const isVisible = await resultsContainer.isVisible();
+            
+            if (!isVisible) {
+                this.bot.log(this.bot.isMobile, '搜索-移动端点击', '搜索结果容器不可见，跳过点击');
+                return;
+            }
+            
+            const links = resultsContainer.getByRole('link');
+            const count = await links.count();
+            
+            if (count > 0) {
+                // 移动端点击前3个结果中的一个
+                const clickMaxIndex = Math.min(count, 3);
+                const randomIndex = Math.floor(Math.random() * clickMaxIndex);
+                
+                this.bot.log(this.bot.isMobile, '搜索-移动端点击', `找到 ${count} 个搜索结果链接，将点击第 ${randomIndex + 1} 个`);
+                
+                // 移动端点击前先模拟触摸手势
+                await this.simulateMobileTouchGesture(page, links.nth(randomIndex));
+                
+                // 捕获可能的新开标签页
+                const popupPromise = page.waitForEvent('popup', { timeout: 5000 }).catch(() => null);
+                let popupOpened = null as null | Page;
+                
+                const beforeUrl = page.url();
+                try {
+                    const handle = await links.nth(randomIndex).elementHandle({ timeout: 3000 });
+                    if (handle) {
+                        this.bot.log(this.bot.isMobile, '搜索-移动端点击', '正在点击搜索结果链接...');
+                        
+                        // 移动端使用触摸点击
+                        await page.evaluate((el) => {
+                            try {
+                                // 模拟移动端触摸事件（兼容性处理）
+                                const rect = el.getBoundingClientRect();
+                                const centerX = rect.left + rect.width / 2;
+                                const centerY = rect.top + rect.height / 2;
+                                
+                                // 创建触摸事件（如果支持）
+                                if (typeof TouchEvent !== 'undefined' && typeof Touch !== 'undefined') {
+                                    const touchEvent = new TouchEvent('touchstart', {
+                                        bubbles: true,
+                                        cancelable: true,
+                                        touches: [new Touch({
+                                            identifier: 1,
+                                            target: el,
+                                            clientX: centerX,
+                                            clientY: centerY
+                                        })]
+                                    });
+                                    el.dispatchEvent(touchEvent);
+                                }
+                                
+                                // 短暂延迟后触发点击
+                                setTimeout(() => {
+                                    (el as HTMLElement).click();
+                                }, 100);
+                            } catch (error) {
+                                // 如果触摸事件失败，直接点击
+                                (el as HTMLElement).click();
+                            }
+                        }, handle);
+                        
+                        this.bot.log(this.bot.isMobile, '搜索-移动端点击', '移动端点击完成，等待页面响应...');
+                    } else {
+                        throw new Error('未获取到可点击的链接句柄');
+                    }
+                    popupOpened = await popupPromise;
+                } catch (clickError) {
+                    this.bot.log(this.bot.isMobile, '搜索-移动端点击', `点击链接失败: ${clickError}`, 'warn');
+                }
+                
+                if (popupOpened) {
+                    this.bot.log(this.bot.isMobile, '搜索-移动端点击', '检测到新标签页打开，等待页面加载...');
+                    await popupOpened.waitForLoadState('domcontentloaded').catch(() => {});
+                    
+                    // 移动端停留时间更长，模拟真实用户行为
+                    const waitTime = Math.floor(Math.random() * 5000) + 3000; // 3-8秒
+                    this.bot.log(this.bot.isMobile, '搜索-移动端点击', `等待 ${waitTime}ms 后关闭新标签页...`);
+                    await this.bot.utils.wait(waitTime);
+                    
+                    // 关闭新标签页
+                    try {
+                        await popupOpened.close();
+                        this.bot.log(this.bot.isMobile, '搜索-移动端点击', '新标签页已关闭');
+                    } catch (closeError) {
+                        this.bot.log(this.bot.isMobile, '搜索-移动端点击', `关闭新标签页失败: ${closeError}`, 'warn');
+                    }
+                    return;
+                }
+                
+                // 如果没有弹窗，等待短暂的同页导航或 URL 变化
+                if (!popupOpened) {
+                    this.bot.log(this.bot.isMobile, '搜索-移动端点击', '未检测到新标签页，等待同页导航...');
+                    await Promise.race([
+                        page.waitForNavigation({ timeout: 4000 }).catch(() => null),
+                        page.waitForURL((url) => url.toString() !== beforeUrl, { timeout: 4000 }).catch(() => null)
+                    ]);
+                }
+                
+                // 若当前页发生了同页跳转，则尝试回退
+                await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+                const currentUrl = page.url();
+                if (!/bing\.com\/search/i.test(currentUrl)) {
+                    this.bot.log(this.bot.isMobile, '搜索-移动端点击', `检测到同页跳转至非搜索页: ${currentUrl}，将回退到搜索结果`);
+                    await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
+                }
+                
+                this.bot.log(this.bot.isMobile, '搜索-移动端点击', '移动端点击仿真完成');
+            } else {
+                this.bot.log(this.bot.isMobile, '搜索-移动端点击', '未找到可点击的链接');
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '搜索-移动端点击', `发生错误: ${errorMessage}`, 'error');
+        }
+    }
+
+    // [新增] 检查是否遇到真人检测页面
+    private async checkHumanVerificationPage(page: Page): Promise<boolean> {
+        try {
+            // 检查常见的真人检测页面标识
+            const humanVerificationSelectors = [
+                'input[type="checkbox"]',
+                '[data-testid*="captcha"]',
+                '[class*="captcha"]',
+                '[id*="captcha"]',
+                'iframe[src*="captcha"]',
+                'iframe[src*="recaptcha"]',
+                'iframe[src*="hcaptcha"]',
+                '[class*="verification"]',
+                '[id*="verification"]',
+                'button:has-text("验证")',
+                'button:has-text("Verify")',
+                'button:has-text("I\'m not a robot")',
+                'button:has-text("我不是机器人")'
+            ];
+
+            for (const selector of humanVerificationSelectors) {
+                const element = page.locator(selector);
+                if (await element.count() > 0 && await element.first().isVisible({ timeout: 1000 }).catch(() => false)) {
+                    this.bot.log(this.bot.isMobile, '搜索-真人检测检查', `检测到真人检测页面元素: ${selector}`);
+                    return true;
+                }
+            }
+
+            // 检查页面内容是否包含真人检测相关文本
+            const pageContent = await page.content();
+            const humanVerificationTexts = [
+                'captcha',
+                'recaptcha',
+                'hcaptcha',
+                'verification',
+                'verify',
+                'robot',
+                '机器人',
+                '验证',
+                'human',
+                'challenge'
+            ];
+
+            const lowerContent = pageContent.toLowerCase();
+            for (const text of humanVerificationTexts) {
+                if (lowerContent.includes(text)) {
+                    this.bot.log(this.bot.isMobile, '搜索-真人检测检查', `页面内容包含真人检测相关文本: ${text}`);
+                    return true;
+                }
+            }
+
+            return false;
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '搜索-真人检测检查', `检查真人检测页面时出错: ${error}`, 'warn');
+            return false;
+        }
+    }
+
+    // [新增] 模拟移动端触摸手势
+    private async simulateMobileTouchGesture(page: Page, element: any) {
+        try {
+            // 获取元素位置
+            const boundingBox = await element.boundingBox();
+            if (!boundingBox) return;
+
+            const centerX = boundingBox.x + boundingBox.width / 2;
+            const centerY = boundingBox.y + boundingBox.height / 2;
+
+            // 模拟触摸前的短暂停留
+            await this.bot.utils.wait(Math.random() * 500 + 200);
+
+            // 模拟触摸手势：先触摸，再点击
+            await page.touchscreen.tap(centerX, centerY);
+            
+            this.bot.log(this.bot.isMobile, '搜索-移动端触摸', '模拟移动端触摸手势完成');
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '搜索-移动端触摸', `模拟触摸手势失败: ${error}`, 'warn');
+        }
+    }
+
+    // [新增] 模拟移动端搜索前的行为
+    private async simulateMobilePreSearchBehavior(page: Page) {
+        try {
+            this.bot.log(this.bot.isMobile, '搜索-移动端预搜索', '开始模拟移动端搜索前行为...');
+            
+            // 随机等待时间，模拟用户浏览页面
+            const waitTime = Math.random() * 2000 + 1000; // 1-3秒
+            await this.bot.utils.wait(waitTime);
+            
+            // 随机进行小幅度的页面滚动，模拟用户浏览
+            if (Math.random() > 0.5) {
+                const scrollDistance = Math.floor(Math.random() * 200) + 50; // 50-250px
+                await page.evaluate((distance) => {
+                    window.scrollBy({
+                        top: distance,
+                        behavior: 'smooth'
+                    });
+                }, scrollDistance);
+                
+                await this.bot.utils.wait(500);
+                
+                // 滚动回顶部
+                await page.evaluate(() => {
+                    window.scrollTo({
+                        top: 0,
+                        behavior: 'smooth'
+                    });
+                });
+            }
+            
+            this.bot.log(this.bot.isMobile, '搜索-移动端预搜索', '移动端搜索前行为模拟完成');
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '搜索-移动端预搜索', `模拟搜索前行为失败: ${error}`, 'warn');
+        }
+    }
+
+    // [新增] 模拟移动端真实输入行为
+    private async simulateMobileTyping(page: Page, selector: string, text: string) {
+        try {
+            this.bot.log(this.bot.isMobile, '搜索-移动端输入', '开始模拟移动端真实输入行为...');
+            
+            // 先点击搜索框
+            await page.click(selector);
+            await this.bot.utils.wait(300);
+            
+            // 清空搜索框
+            await page.fill(selector, '');
+            await this.bot.utils.wait(200);
+            
+            // 模拟分段输入，避免逐字符输入的问题
+            const segments = this.splitTextIntoSegments(text);
+            for (const segment of segments) {
+                if (segment && segment.length > 0) {
+                    await page.keyboard.type(segment);
+                    
+                    // 随机输入间隔，模拟真实打字速度
+                    const typeDelay = Math.random() * 300 + 100; // 100-400ms
+                    await this.bot.utils.wait(typeDelay);
+                    
+                    // 偶尔添加更长的停顿，模拟思考时间
+                    if (Math.random() > 0.7) {
+                        const pauseTime = Math.random() * 500 + 200; // 200-700ms
+                        await this.bot.utils.wait(pauseTime);
+                    }
+                }
+            }
+            
+            // 输入完成后短暂等待
+            await this.bot.utils.wait(Math.random() * 300 + 200);
+            
+            this.bot.log(this.bot.isMobile, '搜索-移动端输入', '移动端真实输入行为模拟完成');
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '搜索-移动端输入', `模拟输入行为失败: ${error}`, 'warn');
+            // 如果模拟输入失败，回退到普通输入
+            await page.fill(selector, text);
+        }
+    }
+
+    // [新增] 将文本分割成小段，用于模拟真实输入
+    private splitTextIntoSegments(text: string): string[] {
+        const segments: string[] = [];
+        let currentSegment = '';
+        
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            currentSegment += char;
+            
+            // 在空格、标点符号或每2-4个字符后分割
+            if (char === ' ' || char === '.' || char === ',' || char === '?' || char === '!' || 
+                currentSegment.length >= Math.floor(Math.random() * 3) + 2) {
+                segments.push(currentSegment);
+                currentSegment = '';
+            }
+        }
+        
+        // 添加剩余部分
+        if (currentSegment.length > 0) {
+            segments.push(currentSegment);
+        }
+        
+        return segments;
     }
 
     // [新增] 关闭除第一个以外的所有页面，避免资源占用
@@ -768,22 +1223,24 @@ export class Search extends Workers {
             if (hasCookiesText) {
                 this.bot.log(this.bot.isMobile, '搜索-Cookies', `[${query}] 页面内容包含cookies相关文本，开始查找具体元素...`);
                 
-                // 保存cookies页面的HTML快照用于分析
-                try {
-                    const htmlContent = await page.content();
-                    const sessionDir = path.join(process.cwd(), this.bot.config.sessionPath, 'cookies_analysis');
-                    if (!fs.existsSync(sessionDir)) {
-                        fs.mkdirSync(sessionDir, { recursive: true });
+                // 保存cookies页面的HTML快照用于分析（受配置控制）
+                if (this.bot.config.snapshots?.cookies) {
+                    try {
+                        const htmlContent = await page.content();
+                        const sessionDir = path.join(process.cwd(), this.bot.config.sessionPath, 'cookies_analysis');
+                        if (!fs.existsSync(sessionDir)) {
+                            fs.mkdirSync(sessionDir, { recursive: true });
+                        }
+                        
+                        const timestamp = Date.now();
+                        const htmlPath = path.join(sessionDir, `cookies_page_${timestamp}.html`);
+                        fs.writeFileSync(htmlPath, htmlContent);
+                        
+                        this.bot.log(this.bot.isMobile, '搜索-Cookies', `[${query}] Cookies页面HTML快照已保存: ${htmlPath}`);
+                        
+                    } catch (snapshotError) {
+                        this.bot.log(this.bot.isMobile, '搜索-Cookies', `[${query}] 保存Cookies页面HTML快照失败: ${snapshotError}`, 'warn');
                     }
-                    
-                    const timestamp = Date.now();
-                    const htmlPath = path.join(sessionDir, `cookies_page_${timestamp}.html`);
-                    fs.writeFileSync(htmlPath, htmlContent);
-                    
-                    this.bot.log(this.bot.isMobile, '搜索-Cookies', `[${query}] Cookies页面HTML快照已保存: ${htmlPath}`);
-                    
-                } catch (snapshotError) {
-                    this.bot.log(this.bot.isMobile, '搜索-Cookies', `[${query}] 保存Cookies页面HTML快照失败: ${snapshotError}`, 'warn');
                 }
                 
                 // 尝试查找具体的cookies模态窗口元素
@@ -1804,10 +2261,5 @@ export class Search extends Workers {
         }
     }
 
-    // [已禁用] 分析真人检测页面HTML结构功能已关闭
-    private async analyzeHumanVerificationHTML(page: Page, query: string, htmlContent: string): Promise<void> {
-        // HTML分析功能已禁用，避免生成大量分析文件
-        this.bot.log(this.bot.isMobile, '搜索-HTML分析', `[${query}] HTML分析功能已禁用`);
-        return;
-    }
+
 }

@@ -7,7 +7,8 @@
     "debug": false,
     "snapshots": {
         "login": false,
-        "taskExecution": false
+        "taskExecution": false,
+        "cookies": false
     },
     "debugOptions": {
         "saveTaskDebugInfo": false,
@@ -43,7 +44,7 @@
     "apiServer": {
         "enabled": true,
         "updateUrl": "https://bot.237890.xyz/",
-        "token":"05d6dd8a36ae1056b334b9c6e83c0a53f7bf2d0bc21a724b",
+        "token":"3c0e678d1567ad691b152d2ccfd7e92490dcd331662c00f8",
         "nodeName": "SB-Codeing",
         "heartbeatInterval": "2m",
         "heartbeatTimeout": "10m"
@@ -55,7 +56,7 @@
     "logPush": {
         "enabled": false,
         "serverUrl": "https://bot.237890.xyz/web_api/logs/receive",
-        "token": "05d6dd8a36ae1056b334b9c6e83c0a53f7bf2d0bc21a724b",
+        "token": "3c0e678d1567ad691b152d2ccfd7e92490dcd331662c00f8",
         "interval": 30
     }
 }

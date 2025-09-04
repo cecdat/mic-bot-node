@@ -4,26 +4,33 @@ import os
 import json
 from datetime import datetime
 import time
+import sys
 import argparse
-import requests
 
-# [核心修正] 移除所有硬编码的路径
-# SEARCH_TERMS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'search_terms')
+# --- 全局变量与函数 ---
+CONFIG_FILE_PATH = '/app/dist/config.json'
+ACCOUNTS_FILE_PATH = '/app/dist/accounts.json'
+SEARCH_TERMS_DIR = '/app/dist/search_terms'
 
 def log_with_time(message):
+    """一个简单的日志函数，可以在每条消息前添加时间戳。"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f"[{timestamp}] {message}")
 
+# --- API热搜获取模块 ---
 def fetch_from_api(base_url, endpoint):
     if not base_url or not endpoint:
         return None
+    
     api_url = f"{base_url.rstrip('/')}/{endpoint}"
     log_with_time(f"正在从自定义API [{api_url}] 获取热搜词...")
     headers = {'User-Agent': 'Mozilla/5.0'}
+    
     try:
         response = requests.get(api_url, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
+        
         if data.get('code') == 200 and 'data' in data:
             titles = [item.get('title') for item in data['data'] if item.get('title')]
             log_with_time(f"成功从API [{endpoint}] 获取 {len(titles)} 条热搜。")
@@ -35,11 +42,14 @@ def fetch_from_api(base_url, endpoint):
         log_with_time(f"从API [{endpoint}] 获取数据时发生错误: {e}")
         return None
 
+# --- [核心修改] 传统热搜抓取模块 (只保留百度作为备用) ---
 def fetch_fallback_hots():
     log_with_time("执行备用方案：抓取百度热搜...")
     fallback_terms = []
     fallback_terms.extend(fetch_baidu_hot())
-    return list(set(fallback_terms))
+    return list(set(fallback_terms)) # 去重
+
+# [核心修改] 移除了 fetch_weibo_hot() 函数
 
 def fetch_baidu_hot():
     log_with_time("正在从 百度实时热搜榜 获取数据...")
@@ -58,6 +68,7 @@ def fetch_baidu_hot():
         log_with_time(f"处理 百度实时热搜榜 数据时发生错误: {e}")
         return []
 
+# --- 主逻辑 ---
 def write_terms_to_file(filepath, terms):
     try:
         with open(filepath, 'w', encoding='utf-8') as f:
@@ -68,19 +79,29 @@ def write_terms_to_file(filepath, terms):
         log_with_time(f"写入文件 {os.path.basename(filepath)} 时发生错误: {e}")
 
 def main():
-    # [核心修正] 使用 argparse 来接收文件路径
-    parser = argparse.ArgumentParser(description='Fetch hot search terms.')
-    parser.add_argument('--config_path', required=True, help='Path to the config.json file.')
-    parser.add_argument('--accounts_path', required=True, help='Path to the accounts file.')
-    parser.add_argument('--output_dir', required=True, help='Directory to save the search term files.')
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='获取热搜词脚本')
+    parser.add_argument('--config_path', help='配置文件路径')
+    parser.add_argument('--accounts_path', help='账户文件路径')
+    parser.add_argument('--output_dir', help='输出目录路径')
+    
     args = parser.parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # 使用命令行参数或默认路径
+    config_path = args.config_path or CONFIG_FILE_PATH
+    accounts_path = args.accounts_path or ACCOUNTS_FILE_PATH
+    output_dir = args.output_dir or SEARCH_TERMS_DIR
+    
+    log_with_time(f"使用配置文件: {config_path}")
+    log_with_time(f"使用账户文件: {accounts_path}")
+    log_with_time(f"输出目录: {output_dir}")
+    
+    os.makedirs(output_dir, exist_ok=True)
     
     try:
-        with open(args.config_path, 'r', encoding='utf-8') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
-        with open(args.accounts_path, 'r', encoding='utf-8') as f:
+        with open(accounts_path, 'r', encoding='utf-8') as f:
             accounts = json.load(f)
     except Exception as e:
         log_with_time(f"读取配置文件失败: {e}")
@@ -92,26 +113,28 @@ def main():
 
     fallback_terms = fetch_fallback_hots()
     if fallback_terms:
-        write_terms_to_file(os.path.join(args.output_dir, 'default.txt'), fallback_terms)
+        write_terms_to_file(os.path.join(output_dir, 'default.txt'), fallback_terms)
     else:
         log_with_time("警告：备用热搜词也未能获取，搜索任务可能无词可用。")
 
     for account in accounts:
         email = account.get('email')
+        # [核心修改] 读取 hotSearchEndpoints 数组
         endpoints = account.get('hotSearchEndpoints')
         
         if not email:
             continue
 
-        user_file_path = os.path.join(args.output_dir, f"{email}.txt")
+        user_file_path = os.path.join(output_dir, f"{email}.txt")
         
         if api_enabled and endpoints and isinstance(endpoints, list):
             all_custom_terms = []
+            # [核心修改] 遍历所有端点，获取数据并合并
             for endpoint in endpoints:
                 custom_terms = fetch_from_api(api_base_url, endpoint)
                 if custom_terms:
                     all_custom_terms.extend(custom_terms)
-                time.sleep(1)
+                time.sleep(1) # 增加延迟，避免请求过快
             
             if all_custom_terms:
                 unique_terms = list(set(all_custom_terms))
@@ -121,7 +144,6 @@ def main():
                 if fallback_terms:
                     write_terms_to_file(user_file_path, fallback_terms)
         else:
-            # 如果没有配置API或端点，确保没有旧的专属文件残留
             if os.path.exists(user_file_path):
                 os.remove(user_file_path)
 

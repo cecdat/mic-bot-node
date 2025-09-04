@@ -1,7 +1,7 @@
 services:
-  mic-bot-node:
+  mic-bot-dev:
     build: .
-    container_name: mic-bot-node
+    container_name: mic-bot-dev
     restart: unless-stopped
     volumes:
       # Mount only the config file and the sessions directory

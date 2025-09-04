@@ -26,6 +26,7 @@ import { Config } from './interface/Config';
 // 添加全局变量跟踪任务运行状态
 let isTaskRunning = false;
 let shouldStopTask = false;
+let lastConfirmedCommand: string | null = null;
 
 // 在文件开头添加内存监控
 let memoryMonitorInterval: NodeJS.Timeout | null = null;
@@ -91,23 +92,56 @@ async function checkInNode() {
             payload.heartbeat_timeout = utils.stringToMs(apiConfig.heartbeatTimeout) / 1000;
         }
 
-        log('main', '节点管理', `向中心服务器签到/发送心跳: ${JSON.stringify(payload)}`);
+        log('main', '节点管理', `📡 向中心服务器签到/发送心跳: ${apiConfig.nodeName}`);
+        log('main', '节点管理', `🌐 服务地址: ${checkinUrl.toString()}`);
+        log('main', '节点管理', `📊 节点状态: ${payload.bot_status}`);
+        
         await axios.post(checkinUrl.toString(), payload, {
-            headers: { 'Authorization': `Bearer ${apiConfig.token}` }
+            headers: { 'Authorization': `Bearer ${apiConfig.token}` },
+            timeout: 30000 // 30秒超时
         });
-        log('main', '节点管理', '节点签到/心跳成功。');
+        log('main', '节点管理', '✅ 节点签到/心跳成功');
     } catch (error) {
         let errorMessage: string;
+        let logLevel: 'warn' | 'error' = 'warn';
+        
         if (axios.isAxiosError(error)) {
-            errorMessage = error.response ? 
-                `服务器错误: ${JSON.stringify(error.response.data)}` : 
-                `请求错误: ${error.message}`;
+            if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+                errorMessage = `请求超时: ${error.message}`;
+                logLevel = 'warn';
+            } else if (error.response) {
+                const status = error.response.status;
+                errorMessage = `服务器错误 (${status}): ${JSON.stringify(error.response.data)}`;
+                
+                // 根据状态码决定日志级别
+                if (status >= 500) {
+                    logLevel = 'warn'; // 服务器错误，可能是临时的
+                } else if (status === 401 || status === 403) {
+                    logLevel = 'error'; // 认证错误，需要检查配置
+                } else {
+                    logLevel = 'warn';
+                }
+            } else {
+                errorMessage = `网络错误: ${error.message}`;
+                logLevel = 'warn';
+            }
         } else if (error instanceof Error) {
             errorMessage = `客户端错误: ${error.message}`;
+            logLevel = 'warn';
         } else {
             errorMessage = `未知错误: ${String(error)}`;
+            logLevel = 'warn';
         }
-        log('main', '节点管理', `节点签到/心跳失败: ${errorMessage}`, 'error');
+        
+        log('main', '节点管理', `❌ 节点签到/心跳失败: ${errorMessage}`, logLevel);
+        
+        // 只在严重错误时提示检查配置
+        if (logLevel === 'error') {
+            log('main', '节点管理', `🔧 请检查网络连接和服务端状态`, 'warn');
+        }
+        
+        // 确保心跳失败不会影响主循环继续运行
+        // 不抛出异常，让主循环继续
     }
 }
 
@@ -189,6 +223,13 @@ async function confirmCommandToServer(command: string) {
     const config = loadConfig();
     const apiConfig = config.apiServer;
     if (!apiConfig || !apiConfig.enabled || !apiConfig.updateUrl) return;
+    
+    // 避免重复确认同一个命令
+    if (lastConfirmedCommand === command) {
+        log('main', '主流程', `ℹ️ 命令 [${command}] 已确认过，跳过重复确认`);
+        return;
+    }
+    
     try {
         const apiUrl = new URL(apiConfig.updateUrl);
         apiUrl.pathname = '/bot_api/confirm_command';
@@ -196,7 +237,8 @@ async function confirmCommandToServer(command: string) {
             { command },
             { headers: { 'Authorization': `Bearer ${apiConfig.token}` } }
         );
-        log('main', '主流程', `向服务器确认命令: [${command}]`);
+        log('main', '主流程', `✅ 向服务器确认命令: [${command}]`);
+        lastConfirmedCommand = command;
     } catch (error) {
         let errorMessage: string;
         if (axios.isAxiosError(error)) {
@@ -206,32 +248,57 @@ async function confirmCommandToServer(command: string) {
         } else {
             errorMessage = String(error);
         }
-        log('main', '主流程', `确认命令失败: ${errorMessage}`, 'error');
+        
+        // 检查是否是 "No pending command to confirm" 错误
+        if (errorMessage.includes('No pending command to confirm') || 
+            errorMessage.includes('"status":"info"')) {
+            // 这种情况是正常的，不需要记录为错误
+            log('main', '主流程', `ℹ️ 命令 [${command}] 已被处理或不存在，无需确认`);
+            lastConfirmedCommand = command; // 标记为已处理
+        } else if (errorMessage.includes('Command mismatch')) {
+            // 命令不匹配，记录为警告
+            log('main', '主流程', `⚠️ 命令不匹配: ${errorMessage}`, 'warn');
+        } else {
+            // 其他错误才记录为错误
+            log('main', '主流程', `❌ 确认命令失败: ${errorMessage}`, 'error');
+        }
     }
 }
 
 async function runHotSearchScript(accounts: Account[]) {
     return new Promise<void>((resolve, reject) => {
-        log('main', '热搜脚本', '开始执行 get_all_hots.py 脚本...');
+        log('main', '热搜脚本', '🔄 开始执行 get_all_hots.py 脚本...');
         
         const baseDir = __dirname;
         const tempAccountsPath = path.join(baseDir, 'accounts.temp.json');
         const configPath = path.join(baseDir, 'config.json');
         const outputDir = path.join(baseDir, 'search_terms');
+        
+        // 确保输出目录存在
+        if (!fs.existsSync(outputDir)) {
+            fs.mkdirSync(outputDir, { recursive: true });
+        }
 
         fs.writeFileSync(tempAccountsPath, JSON.stringify(accounts, null, 2));
 
-        const pythonCommand = `python3 get_all_hots.py --config_path "${configPath}" --accounts_path "${tempAccountsPath}" --output_dir "${outputDir}"`;
+        // 在Docker容器中，get_all_hots.py在/app目录下
+        const pythonCommand = `cd /app && python3 get_all_hots.py --config_path "${configPath}" --accounts_path "${tempAccountsPath}" --output_dir "${outputDir}"`;
+        
+        log('main', '热搜脚本', `执行命令: ${pythonCommand}`);
         
         exec(pythonCommand, (error: ExecException | null, stdout: string, stderr: string) => {
-            fs.unlinkSync(tempAccountsPath);
+            // 清理临时文件
+            if (fs.existsSync(tempAccountsPath)) {
+                fs.unlinkSync(tempAccountsPath);
+            }
+            
             if (error) {
-                log('main', '热搜脚本', `脚本执行失败: ${error.message}`, 'error');
+                log('main', '热搜脚本', `❌ 脚本执行失败: ${error.message}`, 'error');
                 console.error(`stderr: ${stderr}`);
                 reject(error);
                 return;
             }
-            log('main', '热搜脚本', `脚本执行成功。`);
+            log('main', '热搜脚本', `✅ 脚本执行成功`);
             console.log(`stdout: ${stdout}`);
             resolve();
         });
@@ -553,7 +620,7 @@ export class MicrosoftRewardsBot {
             
             // 添加停止检查
             if (shouldStopTask) {
-                log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
+                log('main', '主进程-WORKER', '🛑 检测到停止指令，终止账户任务...', 'warn');
                 return;
             }
             
@@ -571,7 +638,7 @@ export class MicrosoftRewardsBot {
             
             // 添加停止检查
             if (shouldStopTask) {
-                log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
+                log('main', '主进程-WORKER', '🛑 检测到停止指令，终止账户任务...', 'warn');
                 return;
             }
             
@@ -589,7 +656,7 @@ export class MicrosoftRewardsBot {
             
             // 添加停止检查
             if (shouldStopTask) {
-                log('main', '主进程-WORKER', '检测到停止指令，终止账户任务...', 'warn');
+                log('main', '主进程-WORKER', '🛑 检测到停止指令，终止账户任务...', 'warn');
                 return;
             }
             
@@ -682,7 +749,7 @@ export class MicrosoftRewardsBot {
 async function runTasksForAccounts(accounts: Account[], config: Config, taskType: 'desktop' | 'mobile' = 'desktop') {
     // 并发数：优先使用 service 下发的 clusters，其次使用本地 parallel（true 视为 2），默认 1
     const concurrency = Math.max(1, Number((config as any).clusters || (config.parallel ? 2 : 1)) || 1);
-    log('main', '主进程-WORKER', `使用并发数: ${concurrency}，任务类型: ${taskType}`);
+    log('main', '主进程-WORKER', `⚙️ 使用并发数: ${concurrency}，任务类型: ${taskType}`);
 
     const queue: Account[] = accounts.filter(a => !accountStatusManager.isFrozen(a.email));
     const children: ChildProcess[] = [];
@@ -691,25 +758,25 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
     async function spawnWorker(workerId: number) {
         while (queue.length > 0) {
             if (shouldStopTask) {
-                log('main', '主进程-WORKER', `并发#${workerId} 收到停止指令，结束`, 'warn');
+                log('main', '主进程-WORKER', `🛑 并发#${workerId} 收到停止指令，结束`, 'warn');
                 return;
             }
             const account = queue.shift();
             if (!account) break;
 
-            log('main', '主进程-WORKER', `开始为账户 ${account.email} 执行${taskType}任务 (并发#${workerId})`);
+            log('main', '主进程-WORKER', `🚀 开始为账户 ${account.email} 执行${taskType}任务 (并发#${workerId})`);
             const env = { ...process.env, ACCOUNT: JSON.stringify(account), TASK_TYPE: taskType } as any;
             // 尝试多个可能的 worker 文件路径
             let workerPath = './dist/worker.js';
             if (!require('fs').existsSync(workerPath)) {
                 workerPath = './src/worker.ts';
                 if (!require('fs').existsSync(workerPath)) {
-                    log('main', '主进程-WORKER', `错误：找不到 worker 文件，尝试使用 ts-node 执行`, 'error');
+                    log('main', '主进程-WORKER', `❌ 错误：找不到 worker 文件，尝试使用 ts-node 执行`, 'error');
                     workerPath = './src/worker.ts';
                 }
             }
             
-            log('main', '主进程-WORKER', `使用 worker 文件: ${workerPath}`);
+            log('main', '主进程-WORKER', `📁 使用 worker 文件: ${workerPath}`);
             const cp = fork(workerPath, { env, stdio: 'inherit' });
             children.push(cp);
             
@@ -721,7 +788,7 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
                     // [取消] 全局任务超时设置
                     // 现在只依赖搜索任务的错误次数限制（maxLoop达到10次才终止）
                     // 这样可以避免因为网络慢或其他原因导致的过早终止
-                    log('main', '主进程-WORKER', `账户 ${account.email} 已取消全局任务超时，只依赖搜索任务错误次数限制 (并发#${workerId})`);
+                    log('main', '主进程-WORKER', `⏰ 账户 ${account.email} 已取消全局任务超时，只依赖搜索任务错误次数限制 (并发#${workerId})`);
                     
                     // 不再设置超时定时器，让任务自然完成或通过错误次数限制终止
                     // timeoutId = null; // 明确设置为null，表示没有超时
@@ -736,10 +803,10 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
                             }
                             
                             if (code === 0) {
-                                log('main', '主进程-WORKER', `账户 ${account.email} 任务执行成功 (并发#${workerId})`);
+                                log('main', '主进程-WORKER', `✅ 账户 ${account.email} 任务执行成功 (并发#${workerId})`);
                                 resolve();
                             } else {
-                                log('main', '主进程-WORKER', `账户 ${account.email} 任务执行失败，退出码: ${code} (并发#${workerId})`, 'warn');
+                                log('main', '主进程-WORKER', `❌ 账户 ${account.email} 任务执行失败，退出码: ${code} (并发#${workerId})`, 'warn');
                                 failedAccounts.push(account.email);
                                 // 即使失败也resolve，继续处理下一个账号
                                 resolve();
@@ -755,7 +822,7 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
                 }
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                log('main', '主进程-WORKER', `账户 ${account.email} 任务执行异常: ${errorMessage} (并发#${workerId})`, 'error');
+                log('main', '主进程-WORKER', `💥 账户 ${account.email} 任务执行异常: ${errorMessage} (并发#${workerId})`, 'error');
                 failedAccounts.push(account.email);
                 
                 // 从children数组中移除异常的进程
@@ -768,11 +835,11 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
     }
 
     // 启动固定数量的子进程消费队列（串行复用 child，避免爆炸性进程增长）
-    log('main', '主进程-WORKER', `启动 ${concurrency} 个并发工作进程...`);
+    log('main', '主进程-WORKER', `🚀 启动 ${concurrency} 个并发工作进程...`);
     await Promise.all(Array.from({ length: concurrency }, (_, i) => spawnWorker(i + 1)));
     
     // 等待所有子进程真正完成
-    log('main', '主进程-WORKER', '等待所有子进程完成...');
+    log('main', '主进程-WORKER', '⏳ 等待所有子进程完成...');
     for (const cp of children) {
         if (!cp.killed) {
             try {
@@ -782,7 +849,7 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
                     if (!cp.killed) {
                         setTimeout(() => {
                             if (!cp.killed) {
-                                log('main', '主进程-WORKER', '强制终止超时子进程', 'warn');
+                                log('main', '主进程-WORKER', '⏰ 强制终止超时子进程', 'warn');
                                 cp.kill('SIGKILL');
                             }
                             resolve();
@@ -790,7 +857,7 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
                     }
                 });
             } catch (error) {
-                log('main', '主进程-WORKER', `等待子进程完成时出错: ${error}`, 'warn');
+                log('main', '主进程-WORKER', `⚠️ 等待子进程完成时出错: ${error}`, 'warn');
             }
         }
     }
@@ -799,7 +866,7 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
     for (const cp of children) {
         try { 
             if (!cp.killed) {
-                log('main', '主进程-WORKER', '清理残留运行中的子进程', 'warn');
+                log('main', '主进程-WORKER', '🧹 清理残留运行中的子进程', 'warn');
                 cp.kill('SIGKILL');
             }
         } catch {}
@@ -807,12 +874,12 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
     
     // 报告执行结果
     if (failedAccounts.length > 0) {
-        log('main', '主进程-WORKER', `${taskType}任务执行完成，失败的账户: ${failedAccounts.join(', ')}`, 'warn');
+        log('main', '主进程-WORKER', `⚠️ ${taskType}任务执行完成，失败的账户: ${failedAccounts.join(', ')}`, 'warn');
     } else {
-        log('main', '主进程-WORKER', `当前账户的${taskType}任务执行完成`);
+        log('main', '主进程-WORKER', `✅ 当前账户的${taskType}任务执行完成`);
     }
     
-    log('main', '主进程-WORKER', `runTasksForAccounts函数执行完成 (${taskType})`);
+    log('main', '主进程-WORKER', `🏁 runTasksForAccounts函数执行完成 (${taskType})`);
     
     // [新增] 检查并重置全局任务状态，防止状态卡死
     if (isTaskRunning && !shouldStopTask) {
@@ -850,7 +917,22 @@ async function main() {
 
         // 加载配置
         let config = loadConfig();
-        // 移除配置加载完成的日志，减少非关键信息输出
+        
+        // 检测进程类型（主进程还是子进程）
+        const isMainProcess = !process.env.ACCOUNT && !process.env.TASK_TYPE;
+        
+        // 只在主进程中显示完整的启动信息
+        if (isMainProcess) {
+            log('main', '启动', '🚀 Mic-Bot Node 正在启动...');
+            log('main', '启动', `📋 节点名称: ${config.apiServer?.nodeName || '未配置'}`);
+            log('main', '启动', `🌐 服务地址: ${config.apiServer?.updateUrl || '未配置'}`);
+            log('main', '启动', `🔑 API Token: ${config.apiServer?.token ? '已配置' : '未配置'}`);
+            log('main', '启动', `💓 心跳间隔: ${config.apiServer?.heartbeatInterval || '5m'}`);
+            log('main', '启动', `📊 日志推送: ${config.logPush?.enabled ? '已启用' : '已禁用'}`);
+            if (config.logPush?.enabled) {
+                log('main', '启动', `📤 日志推送间隔: ${config.logPush.interval}秒`);
+            }
+        }
 
         // 启动日志服务器
 
@@ -865,6 +947,9 @@ async function main() {
                 interval: config.logPush.interval
             });
             logPusher.start();
+            if (isMainProcess) {
+                log('main', '启动', '📤 日志推送服务已启动');
+            }
         }
 
         // 确保 searchSettings 总是有默认值
@@ -913,19 +998,42 @@ async function main() {
                     }
                 };
 
-                log('main', '主流程', '已成功合并远程节点配置。');
-                log('main', '主流程', `服务端并发配置 clusters=${(nodeConfig as any).clusters}, 合并后 config.clusters=${(config as any).clusters}`);
+                if (isMainProcess) {
+                    log('main', '启动', '✅ 已成功加载远程节点配置');
+                    log('main', '启动', `⚙️ 服务端并发配置: ${(nodeConfig as any).clusters || '未配置'}`);
+                    log('main', '启动', `🔍 搜索延迟: ${nodeConfig.search_delay_min || '2s'} - ${nodeConfig.search_delay_max || '5s'}`);
+                    log('main', '启动', `📊 日志推送状态: ${nodeConfig.log_push_enabled ? '已启用' : '已禁用'}`);
+                    if (nodeConfig.log_push_enabled) {
+                        log('main', '启动', `📤 日志推送间隔: ${nodeConfig.log_push_interval || 30}秒`);
+                    }
+                }
             }
         } catch (error) {
-            log('main', '主流程', '加载远程节点配置失败，将仅使用本地配置。', 'warn');
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            if (isMainProcess) {
+                log('main', '启动', `⚠️ 加载远程节点配置失败: ${errorMessage}`, 'warn');
+                log('main', '启动', '📋 将仅使用本地配置继续运行', 'warn');
+            }
         }
 
         // 步骤 4: 定时签到/发送心跳
+        if (isMainProcess) {
+            log('main', '启动', '🔄 正在向服务端签到...');
+        }
         await checkInNode();
+        
         // 确保使用最终的 config 对象来获取心跳间隔
         const utils = new Util();
         const heartbeatIntervalMs = utils.stringToMs(config.apiServer?.heartbeatInterval || '5m');
         setInterval(checkInNode, heartbeatIntervalMs);
+        
+        // 启动完成日志
+        if (isMainProcess) {
+            log('main', '启动', '🎉 Mic-Bot Node 启动完成！');
+            log('main', '启动', `📡 节点状态: 在线 (${config.apiServer?.nodeName})`);
+            log('main', '启动', `⏰ 心跳间隔: ${config.apiServer?.heartbeatInterval || '5m'}`);
+            log('main', '启动', '🔄 开始监听服务端指令...');
+        }
 
         // 执行单个任务函数
         async function executeSingleTask(taskData: any) {
@@ -1075,8 +1183,53 @@ async function main() {
         }
 
         // 步骤 5: 开始主循环，监听任务
+        let consecutiveErrors = 0;
+        const maxConsecutiveErrors = 5; // 最大连续错误次数
+        let lastLoopTime = Date.now();
+        const maxLoopInterval = 300000; // 5分钟最大循环间隔
+        
+        // 启动主循环监控
+        const loopMonitor = setInterval(() => {
+            const now = Date.now();
+            const timeSinceLastLoop = now - lastLoopTime;
+            
+            if (timeSinceLastLoop > maxLoopInterval) {
+                log('main', '主流程监控', `主循环可能卡死，距离上次循环已过去${Math.round(timeSinceLastLoop/1000)}秒`, 'error');
+                log('main', '主流程监控', '尝试强制重置主循环状态...', 'warn');
+                
+                // 强制重置状态
+                isTaskRunning = false;
+                shouldStopTask = false;
+                consecutiveErrors = 0;
+                
+                // 尝试重新加载配置
+                try {
+                    config = loadConfig();
+                    log('main', '主流程监控', '配置已重新加载');
+                } catch (configError) {
+                    log('main', '主流程监控', `重新加载配置失败: ${configError}`, 'warn');
+                }
+                
+                // 更新活动状态
+                updateActivityStatus('Idle').catch(error => {
+                    log('main', '主流程监控', `重置活动状态失败: ${error}`, 'warn');
+                });
+                
+                lastLoopTime = now; // 重置时间
+            }
+        }, 60000); // 每分钟检查一次
+        
+        // 确保进程退出时清理监控
+        process.on('exit', () => {
+            clearInterval(loopMonitor);
+        });
+        
         while (true) {
             try {
+                // 更新循环时间戳
+                lastLoopTime = Date.now();
+                // 重置连续错误计数
+                consecutiveErrors = 0;
                 // [新增] 状态健康检查：如果任务状态卡死，自动恢复
                 if (isTaskRunning && !shouldStopTask) {
                     // 检查是否有实际的子进程在运行
@@ -1189,16 +1342,88 @@ async function main() {
                 }
 
             } catch (error) {
+                consecutiveErrors++;
                 let errorMessage: string;
-                if (axios.isAxiosError(error) && (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT')) {
-                    errorMessage = '长轮询超时，正在发起下一次请求...';
-                } else if (axios.isAxiosError(error)) {
-                    errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
+                let retryDelay = 30000; // 默认30秒重试
+                
+                if (axios.isAxiosError(error)) {
+                    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+                        errorMessage = '长轮询超时，正在发起下一次请求...';
+                        retryDelay = 5000; // 超时错误快速重试
+                    } else if (error.response) {
+                        const status = error.response.status;
+                        errorMessage = `服务器错误 (${status}): ${JSON.stringify(error.response.data)}`;
+                        
+                        // 根据HTTP状态码决定重试策略
+                        if (status >= 500) {
+                            // 5xx服务器错误，延长重试间隔
+                            retryDelay = 60000; // 1分钟
+                            log('main', '主流程', `服务器错误，将在${retryDelay/1000}秒后重试`, 'warn');
+                        } else if (status === 401 || status === 403) {
+                            // 认证错误，需要检查配置
+                            log('main', '主流程', `认证失败 (${status})，请检查API Token配置`, 'error');
+                            retryDelay = 300000; // 5分钟
+                        } else if (status === 404) {
+                            // 接口不存在，可能是配置错误
+                            log('main', '主流程', `接口不存在 (${status})，请检查API URL配置`, 'error');
+                            retryDelay = 300000; // 5分钟
+                        } else {
+                            // 其他客户端错误
+                            retryDelay = 60000; // 1分钟
+                        }
+                    } else {
+                        errorMessage = `网络错误: ${error.message}`;
+                        retryDelay = 30000; // 网络错误30秒重试
+                    }
                 } else {
                     errorMessage = String(error);
+                    retryDelay = 30000; // 其他错误30秒重试
                 }
-                log('main', '主流程', `主循环出错: ${errorMessage}`, 'warn');
-                await utils.wait(30000);
+                
+                log('main', '主流程', `主循环出错 (${consecutiveErrors}/${maxConsecutiveErrors}): ${errorMessage}`, 'warn');
+                
+                // 检查连续错误次数
+                if (consecutiveErrors >= maxConsecutiveErrors) {
+                    log('main', '主流程', `连续错误次数达到${maxConsecutiveErrors}次，执行强制恢复...`, 'error');
+                    
+                    // 强制重置所有状态
+                    isTaskRunning = false;
+                    shouldStopTask = false;
+                    consecutiveErrors = 0; // 重置错误计数
+                    
+                    // 尝试重新加载配置
+                    try {
+                        config = loadConfig();
+                        log('main', '主流程', '配置已重新加载');
+                    } catch (configError) {
+                        log('main', '主流程', `重新加载配置失败: ${configError}`, 'warn');
+                    }
+                    
+                    // 更新活动状态
+                    try {
+                        await updateActivityStatus('Idle');
+                        log('main', '主流程', '活动状态已重置为 Idle');
+                    } catch (statusError) {
+                        log('main', '主流程', `重置活动状态失败: ${statusError}`, 'warn');
+                    }
+                    
+                    // 延长重试间隔
+                    retryDelay = 120000; // 2分钟
+                    log('main', '主流程', '强制恢复完成，将延长重试间隔');
+                } else {
+                    // 检查是否需要重置任务状态
+                    if (isTaskRunning && !shouldStopTask) {
+                        log('main', '主流程', '检测到主循环错误且任务状态异常，正在重置任务状态...', 'warn');
+                        isTaskRunning = false;
+                        shouldStopTask = false;
+                        await updateActivityStatus('Idle');
+                        log('main', '主流程', '任务状态已重置为 Idle');
+                    }
+                }
+                
+                // 等待指定时间后重试
+                log('main', '主流程', `等待${retryDelay/1000}秒后重试...`);
+                await utils.wait(retryDelay);
             }
         }
     } catch (error) {

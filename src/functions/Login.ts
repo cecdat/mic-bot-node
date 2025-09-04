@@ -39,7 +39,7 @@ export class Login {
             lastStatus.code === code && 
             lastStatus.message === message &&
             (now - lastStatus.timestamp) < 5 * 60 * 1000) { // 5分钟
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 状态未变化，跳过重复推送`);
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 🔄 状态未变化，跳过重复推送`);
             return;
         }
         
@@ -68,7 +68,7 @@ export class Login {
             // 检查是否有保存的cookies
             const cookies = await page.context().cookies();
             if (cookies.length === 0) {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 无保存的cookies，需要重新登录`);
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 🍪 无保存的cookies，需要重新登录`);
                 return false;
             }
 
@@ -81,7 +81,7 @@ export class Login {
             );
 
             if (!hasMicrosoftCookies) {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 缺少关键Microsoft cookies，需要重新登录`);
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 🍪 缺少关键Microsoft cookies，需要重新登录`);
                 return false;
             }
 
@@ -92,21 +92,21 @@ export class Login {
             // 检查是否直接跳转到登录页面
             const currentUrl = page.url();
             if (currentUrl.includes('login.live.com') || currentUrl.includes('signin.live.com')) {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 会话已过期，重定向到登录页面`);
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] ⏰ 会话已过期，重定向到登录页面`);
                 return false;
             }
 
             // 检查是否在rewards页面且已登录
             const isLoggedIn = await this.checkLoggedInStatus(page, email);
             if (isLoggedIn) {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 本地会话有效`);
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] ✅ 本地会话有效`);
                 return true;
             }
 
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 会话无效，需要重新登录`);
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] ❌ 会话无效，需要重新登录`);
             return false;
         } catch (error) {
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检查会话有效性时出错: ${error}`, 'warn');
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] ⚠️ 检查会话有效性时出错: ${error}`, 'warn');
             return false;
         }
     }
@@ -120,11 +120,11 @@ export class Login {
             const currentUrl = page.url();
             const title = await page.title();
             
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检查登录状态 - URL: ${currentUrl}, 标题: ${title}`);
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 🔍 检查登录状态 - URL: ${currentUrl}, 标题: ${title}`);
             
             // 如果已经在rewards.bing.com且标题包含Microsoft Rewards，说明已登录
             if (currentUrl.includes('rewards.bing.com') && title.includes('Microsoft Rewards')) {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到已在Microsoft Rewards页面，已登录`);
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] ✅ 检测到已在Microsoft Rewards页面，已登录`);
                 return true;
             }
 
@@ -145,7 +145,7 @@ export class Login {
                 try {
                     const element = await page.waitForSelector(selector, { timeout: 2000 });
                     if (element) {
-                        this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到登录指示器: ${selector}，已登录`);
+                        this.bot.log(this.bot.isMobile, '登录', `[${email}] ✅ 检测到登录指示器: ${selector}，已登录`);
                         return true;
                     }
                 } catch (error) {
@@ -158,7 +158,7 @@ export class Login {
             try {
                 const userEmailElements = await page.$$('text=@outlook.com, text=@hotmail.com, text=@gmail.com, text=@live.com');
                 if (userEmailElements.length > 0) {
-                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到用户邮箱信息，已登录`);
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] ✅ 检测到用户邮箱信息，已登录`);
                     return true;
                 }
             } catch (error) {
@@ -169,17 +169,17 @@ export class Login {
             try {
                 const loginButton = await page.waitForSelector('a[href*="login"], button:has-text("登录"), button:has-text("Sign in")', { timeout: 2000 });
                 if (loginButton) {
-                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到登录按钮，未登录`);
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 🔐 检测到登录按钮，未登录`);
                     return false;
                 }
             } catch (error) {
                 // 没有找到登录按钮，可能已登录
             }
 
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 登录状态检查完成，未找到明确的登录指示器`);
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] ❓ 登录状态检查完成，未找到明确的登录指示器`);
             return false;
         } catch (error) {
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 检查登录状态时出错: ${error}`, 'warn');
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] ⚠️ 检查登录状态时出错: ${error}`, 'warn');
             return false;
         }
     }
@@ -187,12 +187,12 @@ export class Login {
     async login(page: Page, email: string, password: string) {
         const platformType = this.bot.isMobile ? 'mobile' : 'pc';
         try {
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 开始登录流程！`);
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 🚀 开始登录流程！`);
             
             // 第一步：检查本地会话是否有效
             const sessionValid = await this.checkSessionValidity(page, email);
             if (sessionValid) {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 本地会话有效，跳过登录流程`);
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] ✅ 本地会话有效，跳过登录流程`);
                 await this.sendSmartStatusUpdate(platformType, true, LoginStatusCode.Success, '会话有效', email);
                 await this.checkAccountLocked(page, email);
                 await saveSessionData(this.bot.config.sessionPath, page.context(), email, this.bot.isMobile);
@@ -214,7 +214,7 @@ export class Login {
             // 第三步：检查是否已经登录
             const isLoggedIn = await this.checkLoggedInStatus(page, email);
             if (isLoggedIn) {
-                this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到已登录状态，跳过登录流程`);
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] ✅ 检测到已登录状态，跳过登录流程`);
                 await this.sendSmartStatusUpdate(platformType, true, LoginStatusCode.Success, '已登录', email);
                 await this.checkAccountLocked(page, email);
             } else {
@@ -224,7 +224,7 @@ export class Login {
             await saveSessionData(this.bot.config.sessionPath, page.context(), email, this.bot.isMobile);
             
             // 登录成功后，访问Microsoft Rewards主页并截图
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 登录成功，正在访问Microsoft Rewards主页...`);
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 🎉 登录成功，正在访问Microsoft Rewards主页...`);
             await this.gotoWithRetry(page, 'https://rewards.bing.com');
             await page.waitForLoadState('domcontentloaded').catch(() => { });
             
@@ -232,7 +232,7 @@ export class Login {
             await this.bot.utils.wait(3000);
             
             // 处理cookies授权弹窗（在Microsoft Rewards页面出现）
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 正在处理Microsoft Rewards页面的cookies授权弹窗...`);
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 🍪 正在处理Microsoft Rewards页面的cookies授权弹窗...`);
             await this.handleCookiesConsent(page);
             
             // 再次等待确保cookies弹窗处理完成
@@ -566,7 +566,7 @@ export class Login {
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.bot.log(this.bot.isMobile, '登录', `密码输入失败: ${errorMessage}`, 'error');
-            await this.handle2FA(page);
+            await this.handle2FA(page, email);
         }
     }
 

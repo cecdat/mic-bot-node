@@ -35,12 +35,12 @@ export class LoginExceptionHandlerManager {
                     await this.loginHandler.handleVerificationPage(page, email);
                     return true; // 假设成功处理
                 default:
-                    this.bot.log(this.bot.isMobile, '异常处理', `[${email}] 未知的异常类型: ${exceptionType}`, 'warn');
+                    this.bot.log(this.bot.isMobile, '异常处理', `[${email}] ❓ 未知的异常类型: ${exceptionType}`, 'warn');
                     return false;
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            this.bot.log(this.bot.isMobile, '异常处理', `[${email}] 处理登录异常时出错: ${errorMessage}`, 'error');
+            this.bot.log(this.bot.isMobile, '异常处理', `[${email}] 💥 处理登录异常时出错: ${errorMessage}`, 'error');
             return false;
         }
     }
