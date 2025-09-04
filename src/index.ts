@@ -37,6 +37,10 @@ let lastStatusUpdateTime = 0;
 let statusUpdateInterval: NodeJS.Timeout | null = null;
 let lastReportedStatus: 'Running' | 'Idle' = 'Idle';
 
+// 添加WebSocket任务调度支持
+let wsClient: any = null;
+let useWebSocketScheduling = false;
+
 
 // 在文件开头添加内存监控
 let memoryMonitorInterval: NodeJS.Timeout | null = null;
@@ -1138,6 +1142,18 @@ async function main() {
         }
         statusUpdateInterval = setInterval(syncStatusPrecisely, 30000);
         
+        // 初始化WebSocket任务调度（可选）
+        try {
+            const WebSocketClient = require('./websocket-client.js');
+            wsClient = new WebSocketClient(config);
+            wsClient.init();
+            useWebSocketScheduling = true;
+            log('main', '启动', '🔌 WebSocket任务调度已启用');
+        } catch (error) {
+            log('main', '启动', `⚠️ WebSocket任务调度初始化失败: ${error}`, 'warn');
+            useWebSocketScheduling = false;
+        }
+        
         // 启动完成日志
         if (isMainProcess) {
             log('main', '启动', '🎉 Mic-Bot Node 启动完成！');
@@ -1332,6 +1348,12 @@ async function main() {
             try {
                 // 更新循环时间戳
                 lastLoopTime = Date.now();
+                
+                // 如果使用WebSocket调度，跳过轮询
+                if (useWebSocketScheduling && wsClient && wsClient.isConnected) {
+                    await new Promise(resolve => setTimeout(resolve, 5000)); // 等待5秒
+                    continue;
+                }
                 // 重置连续错误计数
                 consecutiveErrors = 0;
                 // [新增] 状态健康检查：如果任务状态卡死，自动恢复

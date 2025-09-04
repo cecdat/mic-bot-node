@@ -48,6 +48,7 @@ class NodeWebSocketClient {
             console.log('✅ WebSocket连接成功');
             this.isConnected = true;
             this.reconnectAttempts = 0;
+            this.notifyNodeReady();
         });
 
         this.socket.on('disconnect', () => {
@@ -63,6 +64,23 @@ class NodeWebSocketClient {
 
         this.socket.on('error', (error) => {
             console.error('❌ WebSocket错误:', error);
+        });
+
+        this.socket.on('node_ready_confirmed', (data) => {
+            console.log('✅ 节点准备就绪确认:', data);
+        });
+
+        this.socket.on('new_task', (data) => {
+            console.log('📋 收到新任务:', data);
+            this.handleNewTask(data);
+        });
+
+        this.socket.on('task_status_broadcast', (data) => {
+            console.log('📊 任务状态广播:', data);
+        });
+
+        this.socket.on('task_completed_broadcast', (data) => {
+            console.log('✅ 任务完成广播:', data);
         });
     }
 
@@ -89,6 +107,78 @@ class NodeWebSocketClient {
                 node_name: this.config.apiServer.nodeName,
                 timestamp: new Date().toISOString()
             });
+        }
+    }
+
+    /**
+     * 通知节点准备就绪
+     */
+    notifyNodeReady() {
+        if (this.socket && this.isConnected) {
+            this.socket.emit('node_ready', {
+                node_name: this.config.apiServer.nodeName,
+                timestamp: new Date().toISOString()
+            });
+            console.log('📡 已通知服务端节点准备就绪');
+        }
+    }
+
+    /**
+     * 处理新任务
+     */
+    handleNewTask(data) {
+        const { task_id, command, command_data, node_id, node_name } = data;
+        
+        console.log(`📋 开始执行任务: ${task_id} (${command})`);
+        
+        // 发送任务状态更新
+        this.emitTaskStatusUpdate(task_id, 'received', node_name);
+        
+        // 这里需要调用实际的任务执行逻辑
+        // 由于这是Node.js环境，需要与主进程通信
+        if (typeof process !== 'undefined' && process.send) {
+            process.send({
+                type: 'websocket_task',
+                task_id: task_id,
+                command: command,
+                command_data: command_data,
+                node_id: node_id,
+                node_name: node_name
+            });
+        } else {
+            console.log('⚠️ 无法执行任务：不在子进程环境中');
+            this.emitTaskStatusUpdate(task_id, 'error', node_name, { error: 'Not in child process' });
+        }
+    }
+
+    /**
+     * 发送任务状态更新
+     */
+    emitTaskStatusUpdate(taskId, status, nodeName, result = null) {
+        if (this.socket && this.isConnected) {
+            this.socket.emit('task_status_update', {
+                task_id: taskId,
+                status: status,
+                node_name: nodeName,
+                result: result,
+                timestamp: new Date().toISOString()
+            });
+            console.log(`📊 已发送任务状态更新: ${taskId} -> ${status}`);
+        }
+    }
+
+    /**
+     * 发送任务完成通知
+     */
+    emitTaskCompleted(taskId, nodeName, result = {}) {
+        if (this.socket && this.isConnected) {
+            this.socket.emit('task_completed', {
+                task_id: taskId,
+                node_name: nodeName,
+                result: result,
+                timestamp: new Date().toISOString()
+            });
+            console.log(`✅ 已发送任务完成通知: ${taskId}`);
         }
     }
 
