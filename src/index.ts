@@ -32,6 +32,11 @@ let lastConfirmedCommand: string | null = null;
 let serverOffline = false;
 let lastServerErrorTime = 0;
 
+// 添加精准状态跟踪
+let lastStatusUpdateTime = 0;
+let statusUpdateInterval: NodeJS.Timeout | null = null;
+let lastReportedStatus: 'Running' | 'Idle' = 'Idle';
+
 
 // 在文件开头添加内存监控
 let memoryMonitorInterval: NodeJS.Timeout | null = null;
@@ -237,17 +242,72 @@ async function updateActivityStatus(status: 'Running' | 'Idle') {
     const config = loadConfig();
     const apiConfig = config.apiServer;
     if (!apiConfig || !apiConfig.enabled || !apiConfig.updateUrl) return;
+    
+    // 检查状态是否真的发生了变化
+    if (lastReportedStatus === status) {
+        log('main', '主流程', `📊 状态未变化，跳过上报: [${status}]`);
+        return;
+    }
+    
     try {
         const apiUrl = new URL(apiConfig.updateUrl);
         apiUrl.pathname = '/bot_api/update_activity';
         await axios.post(apiUrl.toString(), 
-            { activity_status: status },
+            { 
+                activity_status: status,
+                timestamp: new Date().toISOString(),
+                isTaskRunning: isTaskRunning
+            },
             { headers: { 'Authorization': `Bearer ${apiConfig.token}` } }
         );
+        
+        // 更新状态记录
+        lastReportedStatus = status;
+        lastStatusUpdateTime = Date.now();
+        
         log('main', '主流程', `📊 向服务器报告当前状态: [${status}] (isTaskRunning=${isTaskRunning})`);
     } catch (error) { 
         const errorMessage = error instanceof Error ? error.message : String(error);
         log('main', '主流程', `❌ 状态上报失败: ${errorMessage}`, 'warn');
+    }
+}
+
+// 精准状态同步函数
+async function syncStatusPrecisely() {
+    const config = loadConfig();
+    const apiConfig = config.apiServer;
+    if (!apiConfig || !apiConfig.enabled || !apiConfig.updateUrl) return;
+    
+    const currentStatus = isTaskRunning ? 'Running' : 'Idle';
+    const now = Date.now();
+    
+    // 如果状态发生变化，立即上报
+    if (lastReportedStatus !== currentStatus) {
+        await updateActivityStatus(currentStatus);
+        return;
+    }
+    
+    // 如果状态未变化，但超过30秒未更新，也进行同步
+    if (now - lastStatusUpdateTime > 30000) {
+        try {
+            const apiUrl = new URL(apiConfig.updateUrl);
+            apiUrl.pathname = '/bot_api/sync_status';
+            await axios.post(apiUrl.toString(), 
+                { 
+                    activity_status: currentStatus,
+                    timestamp: new Date().toISOString(),
+                    isTaskRunning: isTaskRunning,
+                    lastUpdateTime: lastStatusUpdateTime
+                },
+                { headers: { 'Authorization': `Bearer ${apiConfig.token}` } }
+            );
+            
+            lastStatusUpdateTime = now;
+            log('main', '状态同步', `📊 状态同步完成: [${currentStatus}]`);
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            log('main', '状态同步', `❌ 状态同步失败: ${errorMessage}`, 'warn');
+        }
     }
 }
 
@@ -1071,6 +1131,12 @@ async function main() {
         const utils = new Util();
         const heartbeatIntervalMs = utils.stringToMs(config.apiServer?.heartbeatInterval || '5m');
         setInterval(checkInNode, heartbeatIntervalMs);
+        
+        // 启动精准状态同步（每30秒）
+        if (statusUpdateInterval) {
+            clearInterval(statusUpdateInterval);
+        }
+        statusUpdateInterval = setInterval(syncStatusPrecisely, 30000);
         
         // 启动完成日志
         if (isMainProcess) {
