@@ -92,6 +92,9 @@ async function checkInNode() {
             bot_status: isTaskRunning ? 'Running' : 'Idle',
             timestamp: utcTimestamp
         };
+        
+        // 添加状态日志，便于调试
+        log('main', '节点管理', `📊 当前任务状态: isTaskRunning=${isTaskRunning}, 上报状态: ${payload.bot_status}`);
 
         if (apiConfig.heartbeatTimeout) {
             payload.heartbeat_timeout = utils.stringToMs(apiConfig.heartbeatTimeout) / 1000;
@@ -241,8 +244,11 @@ async function updateActivityStatus(status: 'Running' | 'Idle') {
             { activity_status: status },
             { headers: { 'Authorization': `Bearer ${apiConfig.token}` } }
         );
-        log('main', '主流程', `向服务器报告当前状态: [${status}]`);
-    } catch (error) { /* Silent fail */ }
+        log('main', '主流程', `📊 向服务器报告当前状态: [${status}] (isTaskRunning=${isTaskRunning})`);
+    } catch (error) { 
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        log('main', '主流程', `❌ 状态上报失败: ${errorMessage}`, 'warn');
+    }
 }
 
 async function confirmCommandToServer(command: string) {
@@ -1072,6 +1078,16 @@ async function main() {
             log('main', '启动', `📡 节点状态: 在线 (${config.apiServer?.nodeName})`);
             log('main', '启动', `⏰ 心跳间隔: ${config.apiServer?.heartbeatInterval || '5m'}`);
             log('main', '启动', '🔄 开始监听服务端指令...');
+            
+            // 确保启动时状态正确
+            if (isTaskRunning) {
+                log('main', '启动', '⚠️ 检测到启动时任务状态异常，正在重置...', 'warn');
+                isTaskRunning = false;
+                await updateActivityStatus('Idle');
+                log('main', '启动', '✅ 任务状态已重置为 Idle');
+            } else {
+                log('main', '启动', `📊 当前任务状态: Idle (isTaskRunning=${isTaskRunning})`);
+            }
         }
 
         // 执行单个任务函数
