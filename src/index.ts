@@ -28,6 +28,11 @@ let isTaskRunning = false;
 let shouldStopTask = false;
 let lastConfirmedCommand: string | null = null;
 
+// 添加服务端状态跟踪
+let serverOffline = false;
+let lastServerErrorTime = 0;
+
+
 // 在文件开头添加内存监控
 let memoryMonitorInterval: NodeJS.Timeout | null = null;
 
@@ -100,6 +105,15 @@ async function checkInNode() {
             headers: { 'Authorization': `Bearer ${apiConfig.token}` },
             timeout: 30000 // 30秒超时
         });
+        
+        // 检查服务端是否从离线状态恢复
+        if (serverOffline) {
+            const offlineDuration = Math.round((Date.now() - lastServerErrorTime) / 1000);
+            log('main', '节点管理', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
+            serverOffline = false;
+            lastServerErrorTime = 0;
+        }
+        
         log('main', '节点管理', '✅ 节点签到/心跳成功');
     } catch (error) {
         let errorMessage: string;
@@ -113,9 +127,15 @@ async function checkInNode() {
                 const status = error.response.status;
                 errorMessage = `服务器错误 (${status}): ${JSON.stringify(error.response.data)}`;
                 
-                // 根据状态码决定日志级别
+                // 根据状态码决定日志级别和离线状态
                 if (status >= 500) {
                     logLevel = 'warn'; // 服务器错误，可能是临时的
+                    // 标记服务端为离线状态
+                    if (!serverOffline) {
+                        serverOffline = true;
+                        lastServerErrorTime = Date.now();
+                        log('main', '节点管理', '⚠️ 服务端暂时不可用，进入离线模式', 'warn');
+                    }
                 } else if (status === 401 || status === 403) {
                     logLevel = 'error'; // 认证错误，需要检查配置
                 } else {
@@ -124,6 +144,12 @@ async function checkInNode() {
             } else {
                 errorMessage = `网络错误: ${error.message}`;
                 logLevel = 'warn';
+                // 网络错误也标记为离线状态
+                if (!serverOffline) {
+                    serverOffline = true;
+                    lastServerErrorTime = Date.now();
+                    log('main', '节点管理', '⚠️ 网络连接异常，进入离线模式', 'warn');
+                }
             }
         } else if (error instanceof Error) {
             errorMessage = `客户端错误: ${error.message}`;
@@ -881,14 +907,27 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
     
     log('main', '主进程-WORKER', `🏁 runTasksForAccounts函数执行完成 (${taskType})`);
     
-    // [新增] 检查并重置全局任务状态，防止状态卡死
+    // [修复] 确保任务完成后状态被正确重置
+    // 检查是否还有子进程在运行
+    if (children.length > 0) {
+        log('main', '主进程-WORKER', `⚠️ 还有 ${children.length} 个子进程在运行，等待完成...`, 'warn');
+        // 等待所有子进程完成
+        await Promise.all(children.map(cp => new Promise<void>((resolve) => {
+            if (cp.killed || cp.exitCode !== null) {
+                resolve();
+            } else {
+                cp.on('exit', () => resolve());
+                cp.on('error', () => resolve());
+            }
+        })));
+        log('main', '主进程-WORKER', '所有子进程已完成');
+    }
+    
+    // 任务完成后，确保状态被重置
     if (isTaskRunning && !shouldStopTask) {
-        // 如果所有子进程都完成了，但全局状态还是运行中，说明状态同步有问题
-        if (children.length === 0) {
-            log('main', '主进程-WORKER', '检测到状态同步问题：所有子进程已完成但全局状态仍为运行中，正在重置...', 'warn');
-            isTaskRunning = false;
-            log('main', '主进程-WORKER', '全局任务状态已重置为 false');
-        }
+        log('main', '主进程-WORKER', '任务执行完成，重置全局任务状态...', 'warn');
+        isTaskRunning = false;
+        log('main', '主进程-WORKER', '全局任务状态已重置为 false');
     }
 }
 
@@ -1050,68 +1089,19 @@ async function main() {
             // 状态已在主循环中设置，这里不需要重复设置
             try {
                 shouldStopTask = false; // 重置停止标志
-                await updateActivityStatus('Running');
 
                 log('main', '执行单个任务', `开始执行任务 ${taskData.task_id}: ${taskData.task_type}`);
 
-                // 获取账户列表
-                const accounts = await loadAccounts();
-                if (accounts.length === 0) {
-                    log('main', '执行单个任务', '未获取到分配的账户，任务终止。');
-                    return;
-                }
-
-                // 为简化示例，我们使用第一个账户执行任务
-                const account = accounts[0];
-                if (!account) {
-                    log('main', '执行单个任务', '未获取到有效的账户，任务终止。', 'error');
-                    return;
-                }
-                log('main', '执行单个任务', `使用账户 ${account.email} 执行任务`);
-
-                const bot = new MicrosoftRewardsBot();
-                bot.config = config; // 使用合并后的配置
-                bot.account = account;
-                bot.axios = new Axios(account.proxy);
-
-                // 创建浏览器实例
-                const browser = await playwright.chromium.launch({headless: true});
-                try {
-                    // 根据任务类型执行相应的操作，而不是执行完整的桌面端+移动端流程
-                    switch (taskData.task_type) {
-                        case 'node_job':
-                            // 节点任务：只执行必要的操作，不执行完整的奖励任务
-                            log('main', '执行单个任务', `执行节点任务: ${taskData.task_id}`);
-                            // 这里可以添加节点特定的任务逻辑
-                            break;
-                        case 'search_task':
-                            // 搜索任务：只执行搜索相关操作
-                            log('main', '执行单个任务', `执行搜索任务: ${taskData.task_id}`);
-                            // 这里可以添加搜索特定的任务逻辑
-                            break;
-                        default:
-                            log('main', '执行单个任务', `未知任务类型: ${taskData.task_type}，跳过执行`);
-                            break;
-                    }
-                    
-                    log('main', '执行单个任务', `任务 ${taskData.task_id} 执行完成`);
-                } finally {
-                    await browser.close();
-                }
-
+                // 对于定时任务，直接调用executeTasks执行完整的任务流程
+                await executeTasks();
+                log('main', '执行单个任务', `任务 ${taskData.task_id} 执行完成`);
+            } catch (error) {
+                log('main', '执行单个任务', `执行任务时出错: ${String(error)}`, 'error');
+            } finally {
                 if (!shouldStopTask) {
                     await updateActivityStatus('Idle');
                     log('main', '执行单个任务', '任务执行完毕，返回待机状态。');
                 }
-            } catch (error) {
-                log('main', '执行单个任务', `执行任务时出错: ${String(error)}`, 'error');
-                if (!shouldStopTask) {
-                    await updateActivityStatus('Idle');
-                }
-            } finally {
-                isTaskRunning = false;
-                // 确认命令已执行
-                await confirmCommandToServer('RUN_TASK');
             }
         }
 
@@ -1120,7 +1110,6 @@ async function main() {
             // 状态已在主循环中设置，这里不需要重复设置
             try {
                 shouldStopTask = false; // 重置停止标志
-                await updateActivityStatus('Running');
 
                 const accounts = await loadAccounts();
                 if (accounts.length > 0) {
@@ -1138,6 +1127,16 @@ async function main() {
                         
                         log('main', '主流程', `开始处理账户: ${account.email}`);
                         
+                        // 获取今日初始积分
+                        const todayStr = new Util().getYYYYMMDD();
+                        const dailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
+                        let initialPointsToday = 0;
+                        
+                        if (dailyPointsData && dailyPointsData.date === todayStr) {
+                            initialPointsToday = dailyPointsData.initialPoints;
+                            log('main', '主流程', `[${account.email}] 使用已保存的今日初始积分: ${initialPointsToday}`);
+                        }
+                        
                         // 先执行桌面端任务
                         log('main', '主流程', `账户 ${account.email} 开始执行桌面端任务...`);
                         await runTasksForAccounts([account], config, 'desktop');
@@ -1153,6 +1152,29 @@ async function main() {
                         log('main', '主流程', `账户 ${account.email} 开始执行移动端任务...`);
                         await runTasksForAccounts([account], config, 'mobile');
                         log('main', '主流程', `账户 ${account.email} 移动端任务执行完成`);
+                        
+                        // 获取最终积分并上报
+                        const finalDailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
+                        if (finalDailyPointsData && finalDailyPointsData.date === todayStr) {
+                            const finalPoints = finalDailyPointsData.desktopFinalPoints || finalDailyPointsData.initialPoints || 0;
+                            const dailyGain = initialPointsToday > 0 ? finalPoints - initialPointsToday : 0;
+                            
+                            log('main', '主流程', `[${account.email}] 积分统计 - 初始: ${initialPointsToday}, 最终: ${finalPoints}, 今日收益: ${dailyGain}`);
+                            
+                            // 上报积分数据
+                            const bot = new MicrosoftRewardsBot();
+                            bot.config = config;
+                            bot.account = account;
+                            bot.axios = new Axios(account.proxy);
+                            
+                            await sendFinalUpdate(bot, {
+                                email: account.email,
+                                total_points: finalPoints,
+                                daily_gain: dailyGain,
+                                desktop_gain: 0, // 子进程执行，无法获取详细收益
+                                mobile_gain: 0   // 子进程执行，无法获取详细收益
+                            });
+                        }
                         
                         log('main', '主流程', `账户 ${account.email} 所有任务执行完成`);
                     }
@@ -1256,6 +1278,14 @@ async function main() {
 
                 const command = response.data.command;
 
+                // 检查服务端是否从离线状态恢复
+                if (serverOffline) {
+                    const offlineDuration = Math.round((Date.now() - lastServerErrorTime) / 1000);
+                    log('main', '主流程', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
+                    serverOffline = false;
+                    lastServerErrorTime = 0;
+                }
+
                 if (command === 'RUN_TASKS') {
                     log('main', '主流程', '收到 [执行任务] 指令，开始执行...');
                     // 严格检查当前任务状态
@@ -1263,21 +1293,20 @@ async function main() {
                         log('main', '主流程', '当前无任务运行，开始执行新任务...');
                         // 立即设置状态，防止重复执行
                         isTaskRunning = true;
+                        // 上报运行状态
+                        await updateActivityStatus('Running');
                         // 等待任务执行完成，确保状态管理正确
                         try {
                             await executeTasks();
-                            log('main', '主流程', '任务执行完成，状态已重置');
-                            // 任务执行完成后，重置状态
-                            if (!shouldStopTask) {
-                                isTaskRunning = false;
-                                log('main', '主流程', '任务执行完成，状态已重置为 false');
-                            }
+                            log('main', '主流程', '任务执行完成');
                         } catch (err) {
                             log('main', '任务执行', `任务执行出错: ${String(err)}`, 'error');
-                            // 出错时也要重置状态
+                        } finally {
+                            // 确保状态总是被重置
                             if (!shouldStopTask) {
                                 isTaskRunning = false;
-                                log('main', '主流程', '任务执行出错，状态已重置为 false');
+                                await updateActivityStatus('Idle');
+                                log('main', '主流程', '任务执行完成，状态已重置为 false');
                             }
                         }
                         // 确认命令已接收
@@ -1297,21 +1326,20 @@ async function main() {
                         log('main', '主流程', '当前无任务运行，开始执行单个任务...');
                         // 立即设置状态，防止重复执行
                         isTaskRunning = true;
+                        // 上报运行状态
+                        await updateActivityStatus('Running');
                         // 等待单个任务执行完成，确保状态管理正确
                         try {
                             await executeSingleTask(taskData);
-                            log('main', '主流程', '单个任务执行完成，状态已重置');
-                            // 单个任务执行完成后，重置状态
-                            if (!shouldStopTask) {
-                                isTaskRunning = false;
-                                log('main', '主流程', '单个任务执行完成，状态已重置为 false');
-                            }
+                            log('main', '主流程', '单个任务执行完成');
                         } catch (err) {
                             log('main', '执行单个任务', `单个任务执行出错: ${String(err)}`, 'error');
-                            // 出错时也要重置状态
+                        } finally {
+                            // 确保状态总是被重置
                             if (!shouldStopTask) {
                                 isTaskRunning = false;
-                                log('main', '主流程', '单个任务执行出错，状态已重置为 false');
+                                await updateActivityStatus('Idle');
+                                log('main', '主流程', '单个任务执行完成，状态已重置为 false');
                             }
                         }
                         // 确认命令已接收
@@ -1359,6 +1387,12 @@ async function main() {
                             // 5xx服务器错误，延长重试间隔
                             retryDelay = 60000; // 1分钟
                             log('main', '主流程', `服务器错误，将在${retryDelay/1000}秒后重试`, 'warn');
+                            // 标记服务端为离线状态
+                            if (!serverOffline) {
+                                serverOffline = true;
+                                lastServerErrorTime = Date.now();
+                                log('main', '主流程', '⚠️ 服务端暂时不可用，进入离线模式', 'warn');
+                            }
                         } else if (status === 401 || status === 403) {
                             // 认证错误，需要检查配置
                             log('main', '主流程', `认证失败 (${status})，请检查API Token配置`, 'error');
@@ -1374,6 +1408,12 @@ async function main() {
                     } else {
                         errorMessage = `网络错误: ${error.message}`;
                         retryDelay = 30000; // 网络错误30秒重试
+                        // 网络错误也标记为离线状态
+                        if (!serverOffline) {
+                            serverOffline = true;
+                            lastServerErrorTime = Date.now();
+                            log('main', '主流程', '⚠️ 网络连接异常，进入离线模式', 'warn');
+                        }
                     }
                 } else {
                     errorMessage = String(error);
