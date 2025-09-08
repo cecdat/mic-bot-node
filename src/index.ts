@@ -202,6 +202,17 @@ class NodeWebSocketClient {
             // 静默处理pong响应，减少日志输出
             // log('main', 'WebSocket', `🏓 收到pong响应: ${JSON.stringify(data)}`);
         });
+
+        this.socket.on('upgrade_command', (data: any) => {
+            log('main', 'WebSocket', `🔄 收到升级命令: ${JSON.stringify(data)}`);
+            // 将升级命令存储到全局变量，让主循环处理
+            globalWebSocketTask = {
+                task_id: data.upgrade_id,
+                command: 'UPGRADE',
+                command_data: data,
+                node_name: this.config.apiServer?.nodeName || 'unknown'
+            };
+        });
     }
 
     /**
@@ -526,6 +537,183 @@ async function executeTasks() {
     }
     
     return taskResult;
+}
+
+/**
+ * 执行升级命令
+ */
+async function executeUpgrade(upgradeData: any) {
+    const { image_tag = 'latest', force_pull = true, upgrade_id, upgrade_type = 'full' } = upgradeData;
+    
+    try {
+        log('main', '升级', `开始执行升级: ${image_tag} (${upgrade_type})`);
+        
+        // 发送升级状态更新
+        if (wsClient && wsClient.connected) {
+            wsClient.safeEmit('upgrade_status', {
+                node_id: config.apiServer?.nodeName || 'unknown',
+                upgrade_id,
+                status: 'started',
+                progress: 0,
+                message: '开始升级...'
+            });
+        }
+        
+        // 1. 停止当前容器
+        log('main', '升级', '停止当前容器...');
+        try {
+            const stopResult = await execCommand('docker-compose down');
+            log('main', '升级', `停止容器结果: ${stopResult}`);
+        } catch (error) {
+            log('main', '升级', `停止容器失败: ${error}`, 'warn');
+        }
+        
+        // 发送进度更新
+        if (wsClient && wsClient.connected) {
+            wsClient.safeEmit('upgrade_status', {
+                node_id: config.apiServer?.nodeName || 'unknown',
+                upgrade_id,
+                status: 'preparing',
+                progress: 15,
+                message: '准备升级文件...'
+            });
+        }
+        
+        // 2. 根据升级类型处理文件
+        if (upgrade_type === 'full') {
+            // 全量升级：拉取新镜像
+            if (force_pull) {
+                log('main', '升级', `拉取镜像: mic-bot-node:${image_tag}`);
+                try {
+                    const pullResult = await execCommand(`docker pull mic-bot-node:${image_tag}`);
+                    log('main', '升级', `拉取镜像结果: ${pullResult}`);
+                } catch (error) {
+                    log('main', '升级', `拉取镜像失败: ${error}`, 'error');
+                    throw error;
+                }
+            }
+        } else if (upgrade_type === 'files') {
+            // 文件升级：从Git拉取最新代码并重新构建
+            log('main', '升级', '文件升级：拉取最新代码...');
+            try {
+                // 备份当前配置
+                await execCommand('cp src/config.json src/config.json.backup');
+                await execCommand('cp compose.yaml compose.yaml.backup');
+                
+                // 拉取最新代码
+                const gitResult = await execCommand('git pull origin main');
+                log('main', '升级', `Git拉取结果: ${gitResult}`);
+                
+                // 恢复配置文件
+                await execCommand('cp src/config.json.backup src/config.json');
+                await execCommand('cp compose.yaml.backup compose.yaml');
+                
+                // 清理备份文件
+                await execCommand('rm -f src/config.json.backup compose.yaml.backup');
+                
+            } catch (error) {
+                log('main', '升级', `文件升级失败: ${error}`, 'error');
+                throw error;
+            }
+        }
+        
+        // 发送进度更新
+        if (wsClient && wsClient.connected) {
+            wsClient.safeEmit('upgrade_status', {
+                node_id: config.apiServer?.nodeName || 'unknown',
+                upgrade_id,
+                status: 'building',
+                progress: 50,
+                message: '重新构建镜像...'
+            });
+        }
+        
+        // 3. 重新构建并启动容器
+        log('main', '升级', '重新构建并启动容器...');
+        try {
+            const buildResult = await execCommand('docker-compose up -d --build');
+            log('main', '升级', `构建启动结果: ${buildResult}`);
+        } catch (error) {
+            log('main', '升级', `构建启动失败: ${error}`, 'error');
+            throw error;
+        }
+        
+        // 发送进度更新
+        if (wsClient && wsClient.connected) {
+            wsClient.safeEmit('upgrade_status', {
+                node_id: config.apiServer?.nodeName || 'unknown',
+                upgrade_id,
+                status: 'verifying',
+                progress: 85,
+                message: '验证升级结果...'
+            });
+        }
+        
+        // 4. 验证升级结果
+        log('main', '升级', '验证升级结果...');
+        try {
+            // 等待容器启动
+            await new Promise(resolve => setTimeout(resolve, 10000));
+            
+            // 检查容器状态
+            const statusResult = await execCommand('docker-compose ps');
+            log('main', '升级', `容器状态: ${statusResult}`);
+            
+        } catch (error) {
+            log('main', '升级', `验证升级失败: ${error}`, 'warn');
+        }
+        
+        // 发送完成状态
+        if (wsClient && wsClient.connected) {
+            wsClient.safeEmit('upgrade_status', {
+                node_id: config.apiServer?.nodeName || 'unknown',
+                upgrade_id,
+                status: 'completed',
+                progress: 100,
+                message: '升级完成'
+            });
+        }
+        
+        log('main', '升级', '升级执行完成');
+        
+        // 5. 延迟退出，让新容器启动
+        log('main', '升级', '10秒后退出当前进程，让新容器接管...');
+        setTimeout(() => {
+            process.exit(0);
+        }, 10000);
+        
+    } catch (error) {
+        log('main', '升级', `升级执行失败: ${error}`, 'error');
+        
+        // 发送失败状态
+        if (wsClient && wsClient.connected) {
+            wsClient.safeEmit('upgrade_status', {
+                node_id: config.apiServer?.nodeName || 'unknown',
+                upgrade_id,
+                status: 'failed',
+                progress: 0,
+                message: `升级失败: ${error}`
+            });
+        }
+        
+        throw error;
+    }
+}
+
+/**
+ * 执行系统命令
+ */
+async function execCommand(command: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const { exec } = require('child_process');
+        exec(command, { timeout: 300000 }, (error: any, stdout: string, stderr: string) => {
+            if (error) {
+                reject(new Error(`命令执行失败: ${error.message}\n${stderr}`));
+            } else {
+                resolve(stdout);
+            }
+        });
+    });
 }
 
 /**
@@ -2004,6 +2192,24 @@ async function main() {
                     log('main', '主流程', '停止命令处理完成', 'warn');
                     // 重置任务运行状态，确保可以立即响应新指令
                     isTaskRunning = false;
+                } else if (command === 'UPGRADE') {
+                    log('main', '主流程', '收到 [升级] 指令，开始执行升级...', 'warn');
+                    // 立即更新活动状态为Idle，停止当前任务
+                    shouldStopTask = true;
+                    await updateActivityStatus('Idle');
+                    isTaskRunning = false;
+                    
+                    // 执行升级
+                    try {
+                        await executeUpgrade(taskData.command_data);
+                        log('main', '主流程', '升级执行完成', 'warn');
+                    } catch (error) {
+                        log('main', '主流程', `升级执行失败: ${error}`, 'error');
+                    }
+                    
+                    // 向服务端确认命令已执行
+                    await confirmCommandToServer('UPGRADE');
+                    log('main', '主流程', '升级命令处理完成', 'warn');
                 } else if (command === null) {
                     // 移除空命令的日志输出，减少非关键信息
                     // 不将空命令视为停止指令
