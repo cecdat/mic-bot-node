@@ -471,7 +471,8 @@ async function executeTasks() {
                 // 获取最终积分并上报
                 const finalDailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
                 if (finalDailyPointsData && finalDailyPointsData.date === todayStr) {
-                    const finalPoints = finalDailyPointsData.desktopFinalPoints || finalDailyPointsData.initialPoints || 0;
+                    // 优先使用移动端完成后的最终积分，如果没有则使用桌面端完成后的积分
+                    const finalPoints = finalDailyPointsData.mobileFinalPoints || finalDailyPointsData.desktopFinalPoints || finalDailyPointsData.initialPoints || 0;
                     const dailyGain = initialPointsToday > 0 ? finalPoints - initialPointsToday : 0;
                     
                     log('main', '主流程', `[${account.email}] 积分统计 - 初始: ${initialPointsToday}, 最终: ${finalPoints}, 今日收益: ${dailyGain}`);
@@ -1329,6 +1330,16 @@ export class MicrosoftRewardsBot {
             
             log(true, '主流程', `[${account.email}] 移动端完成 - 初始: ${mobileInitialPoints}, 最终: ${finalPoints}, 收益: ${mobileGain}`);
             
+            // 保存移动端完成后的最终积分
+            const todayStr = this.utils.getYYYYMMDD();
+            await saveDailyPoints(this.config.sessionPath, account.email, {
+                date: todayStr,
+                initialPoints: mobileInitialPoints, // 使用桌面端完成后的积分作为初始值
+                desktopFinalPoints: mobileInitialPoints, // 桌面端完成后的积分
+                mobileFinalPoints: finalPoints // 新增：移动端完成后的最终积分
+            });
+            log(true, '主流程', `[${account.email}] 已保存移动端完成后的最终积分: ${finalPoints}`);
+            
             return { points: finalPoints, gain: mobileGain };
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1339,6 +1350,16 @@ export class MicrosoftRewardsBot {
             
             // 即使出错也返回桌面端的积分，确保流程继续
             log(true, '主流程', `[${account.email}] 移动端任务失败，返回桌面端积分: ${desktopFinalPoints}`);
+            
+            // 保存移动端任务失败时的积分状态
+            const todayStr = this.utils.getYYYYMMDD();
+            await saveDailyPoints(this.config.sessionPath, account.email, {
+                date: todayStr,
+                initialPoints: desktopFinalPoints, // 使用桌面端完成后的积分作为初始值
+                desktopFinalPoints: desktopFinalPoints, // 桌面端完成后的积分
+                mobileFinalPoints: desktopFinalPoints // 移动端失败，最终积分等于桌面端积分
+            });
+            log(true, '主流程', `[${account.email}] 已保存移动端任务失败时的积分状态: ${desktopFinalPoints}`);
             
             // 记录任务失败状态，便于后续分析
             this.accountStatus = '移动端任务失败';

@@ -13,7 +13,8 @@ let configCache: Config;
 export interface DailyPoints {
     date: string;
     initialPoints: number;
-    desktopFinalPoints?: number;  // 新增：桌面端完成后的积分
+    desktopFinalPoints?: number;  // 桌面端完成后的积分
+    mobileFinalPoints?: number;   // 移动端完成后的最终积分
 }
 
 export interface NodeConfig {
