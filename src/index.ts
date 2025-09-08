@@ -540,13 +540,13 @@ async function executeTasks() {
 }
 
 /**
- * 执行升级命令
+ * 执行升级命令 - 容器内升级
  */
 async function executeUpgrade(upgradeData: any) {
-    const { image_tag = 'latest', force_pull = true, upgrade_id, upgrade_type = 'full' } = upgradeData;
+    const { upgrade_id, upgrade_type = 'files', file_url, file_name } = upgradeData;
     
     try {
-        log('main', '升级', `开始执行升级: ${image_tag} (${upgrade_type})`);
+        log('main', '升级', `开始执行升级: ${upgrade_type}`);
         
         // 发送升级状态更新
         if (wsClient && wsClient.connected) {
@@ -559,13 +559,24 @@ async function executeUpgrade(upgradeData: any) {
             });
         }
         
-        // 1. 停止当前容器
-        log('main', '升级', '停止当前容器...');
+        // 发送进度更新
+        if (wsClient && wsClient.connected) {
+            wsClient.safeEmit('upgrade_status', {
+                node_id: config.apiServer?.nodeName || 'unknown',
+                upgrade_id,
+                status: 'preparing',
+                progress: 10,
+                message: '准备升级文件...'
+            });
+        }
+        
+        // 1. 备份当前配置
+        log('main', '升级', '备份当前配置...');
         try {
-            const stopResult = await execCommand('docker-compose down');
-            log('main', '升级', `停止容器结果: ${stopResult}`);
+            await execCommand('cp /app/dist/config.json /tmp/config.json.backup');
+            log('main', '升级', '配置文件备份完成');
         } catch (error) {
-            log('main', '升级', `停止容器失败: ${error}`, 'warn');
+            log('main', '升级', `备份配置失败: ${error}`, 'warn');
         }
         
         // 发送进度更新
@@ -573,46 +584,73 @@ async function executeUpgrade(upgradeData: any) {
             wsClient.safeEmit('upgrade_status', {
                 node_id: config.apiServer?.nodeName || 'unknown',
                 upgrade_id,
-                status: 'preparing',
-                progress: 15,
-                message: '准备升级文件...'
+                status: 'downloading',
+                progress: 20,
+                message: '下载升级文件...'
             });
         }
         
         // 2. 根据升级类型处理文件
-        if (upgrade_type === 'full') {
-            // 全量升级：拉取新镜像
-            if (force_pull) {
-                log('main', '升级', `拉取镜像: mic-bot-node:${image_tag}`);
-                try {
-                    const pullResult = await execCommand(`docker pull mic-bot-node:${image_tag}`);
-                    log('main', '升级', `拉取镜像结果: ${pullResult}`);
-                } catch (error) {
-                    log('main', '升级', `拉取镜像失败: ${error}`, 'error');
-                    throw error;
-                }
-            }
-        } else if (upgrade_type === 'files') {
-            // 文件升级：从Git拉取最新代码并重新构建
-            log('main', '升级', '文件升级：拉取最新代码...');
+        if (upgrade_type === 'zip') {
+            // ZIP文件升级
+            log('main', '升级', 'ZIP文件升级...');
             try {
-                // 备份当前配置
-                await execCommand('cp src/config.json src/config.json.backup');
-                await execCommand('cp compose.yaml compose.yaml.backup');
+                // 下载ZIP文件
+                const downloadResult = await execCommand(`wget -O /tmp/upgrade.zip "${file_url}"`);
+                log('main', '升级', `下载结果: ${downloadResult}`);
                 
-                // 拉取最新代码
-                const gitResult = await execCommand('git pull origin main');
-                log('main', '升级', `Git拉取结果: ${gitResult}`);
+                // 解压ZIP文件
+                const unzipResult = await execCommand('cd /tmp && unzip -o upgrade.zip');
+                log('main', '升级', `解压结果: ${unzipResult}`);
                 
-                // 恢复配置文件
-                await execCommand('cp src/config.json.backup src/config.json');
-                await execCommand('cp compose.yaml.backup compose.yaml');
+                // 复制文件到应用目录
+                const copyResult = await execCommand('cp -r /tmp/dist/* /app/dist/');
+                log('main', '升级', `复制文件结果: ${copyResult}`);
                 
-                // 清理备份文件
-                await execCommand('rm -f src/config.json.backup compose.yaml.backup');
+            } catch (error) {
+                log('main', '升级', `ZIP升级失败: ${error}`, 'error');
+                throw error;
+            }
+        } else if (upgrade_type === 'file') {
+            // 单个文件升级
+            log('main', '升级', '单个文件升级...');
+            try {
+                // 下载文件
+                const downloadResult = await execCommand(`wget -O /tmp/${file_name} "${file_url}"`);
+                log('main', '升级', `下载结果: ${downloadResult}`);
+                
+                // 复制文件到目标位置
+                const copyResult = await execCommand(`cp /tmp/${file_name} /app/dist/`);
+                log('main', '升级', `复制文件结果: ${copyResult}`);
                 
             } catch (error) {
                 log('main', '升级', `文件升级失败: ${error}`, 'error');
+                throw error;
+            }
+        } else if (upgrade_type === 'git') {
+            // Git拉取升级
+            log('main', '升级', 'Git拉取升级...');
+            try {
+                // 备份当前代码
+                await execCommand('cp -r /app/dist /tmp/dist.backup');
+                
+                // 拉取最新代码
+                const gitResult = await execCommand('cd /tmp && git clone https://github.com/your-repo/mic-bot-node.git temp-repo');
+                log('main', '升级', `Git拉取结果: ${gitResult}`);
+                
+                // 构建新代码
+                const buildResult = await execCommand('cd /tmp/temp-repo && npm install && npm run build');
+                log('main', '升级', `构建结果: ${buildResult}`);
+                
+                // 复制新文件
+                const copyResult = await execCommand('cp -r /tmp/temp-repo/dist/* /app/dist/');
+                log('main', '升级', `复制文件结果: ${copyResult}`);
+                
+                // 清理临时文件
+                await execCommand('rm -rf /tmp/temp-repo /tmp/dist.backup');
+                
+            } catch (error) {
+                log('main', '升级', `Git升级失败: ${error}`, 'error');
                 throw error;
             }
         }
@@ -622,20 +660,19 @@ async function executeUpgrade(upgradeData: any) {
             wsClient.safeEmit('upgrade_status', {
                 node_id: config.apiServer?.nodeName || 'unknown',
                 upgrade_id,
-                status: 'building',
-                progress: 50,
-                message: '重新构建镜像...'
+                status: 'restoring',
+                progress: 70,
+                message: '恢复配置文件...'
             });
         }
         
-        // 3. 重新构建并启动容器
-        log('main', '升级', '重新构建并启动容器...');
+        // 3. 恢复配置文件
+        log('main', '升级', '恢复配置文件...');
         try {
-            const buildResult = await execCommand('docker-compose up -d --build');
-            log('main', '升级', `构建启动结果: ${buildResult}`);
+            await execCommand('cp /tmp/config.json.backup /app/dist/config.json');
+            log('main', '升级', '配置文件恢复完成');
         } catch (error) {
-            log('main', '升级', `构建启动失败: ${error}`, 'error');
-            throw error;
+            log('main', '升级', `恢复配置失败: ${error}`, 'warn');
         }
         
         // 发送进度更新
@@ -652,12 +689,12 @@ async function executeUpgrade(upgradeData: any) {
         // 4. 验证升级结果
         log('main', '升级', '验证升级结果...');
         try {
-            // 等待容器启动
-            await new Promise(resolve => setTimeout(resolve, 10000));
+            // 检查文件是否存在
+            const checkResult = await execCommand('ls -la /app/dist/');
+            log('main', '升级', `文件检查结果: ${checkResult}`);
             
-            // 检查容器状态
-            const statusResult = await execCommand('docker-compose ps');
-            log('main', '升级', `容器状态: ${statusResult}`);
+            // 清理临时文件
+            await execCommand('rm -f /tmp/config.json.backup /tmp/upgrade.zip /tmp/*.js');
             
         } catch (error) {
             log('main', '升级', `验证升级失败: ${error}`, 'warn');
@@ -676,11 +713,11 @@ async function executeUpgrade(upgradeData: any) {
         
         log('main', '升级', '升级执行完成');
         
-        // 5. 延迟退出，让新容器启动
-        log('main', '升级', '10秒后退出当前进程，让新容器接管...');
+        // 5. 延迟退出，让新代码生效
+        log('main', '升级', '5秒后退出当前进程，让新代码生效...');
         setTimeout(() => {
             process.exit(0);
-        }, 10000);
+        }, 5000);
         
     } catch (error) {
         log('main', '升级', `升级执行失败: ${error}`, 'error');
