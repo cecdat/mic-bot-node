@@ -34,6 +34,8 @@ async function main() {
                 if (dailyPointsData && dailyPointsData.date === todayStr) {
                     initialPointsToday = dailyPointsData.initialPoints;
                     log('main', '子进程', `[${account.email}] 💰 使用已保存的今日初始积分: ${initialPointsToday}`);
+                } else {
+                    log('main', '子进程', `[${account.email}] 💰 未找到今日初始积分记录，将在登录后获取当前积分作为初始值`);
                 }
                 
                 const desktopResult = await bot.executeDesktopTask(account, initialPointsToday);

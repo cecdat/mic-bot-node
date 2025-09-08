@@ -76,7 +76,7 @@
     "updateUrl": "http://your-server:2002/",
     "token": "your-api-token",
     "nodeName": "your-node-name",
-    "heartbeatInterval": "2m",
+    "heartbeatInterval": "45s",
     "heartbeatTimeout": "10m"
   },
   "logPush": {

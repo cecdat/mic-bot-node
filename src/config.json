@@ -46,7 +46,7 @@
         "updateUrl": "https://bot.237890.xyz/",
         "token":"3c0e678d1567ad691b152d2ccfd7e92490dcd331662c00f8",
         "nodeName": "SB-Codeing",
-        "heartbeatInterval": "30s",
+        "heartbeatInterval": "45s",
         "heartbeatTimeout": "10m"
     },
     "hotSearchApi": {

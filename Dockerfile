@@ -1,5 +1,5 @@
 # Stage 1: Builder (compile TypeScript)
-FROM registry.cn-hangzhou.aliyuncs.com/library/node:18-slim AS builder
+FROM docker.1ms.run/library/node:18-slim AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
@@ -12,7 +12,7 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Production Runtime
-FROM registry.cn-hangzhou.aliyuncs.com/mcr.microsoft.com/playwright:v1.52.0-jammy
+FROM mcr.microsoft.com/playwright:v1.52.0-jammy
 #FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/mcr.microsoft.com/playwright:v1.52.0-jammy
 ENV DEBIAN_FRONTEND=noninteractive
 

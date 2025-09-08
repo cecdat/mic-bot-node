@@ -28,9 +28,20 @@ let isTaskRunning = false;
 let shouldStopTask = false;
 let lastConfirmedCommand: string | null = null;
 
+// 任务执行隔离机制
+let taskExecutionLock = false; // 防止重复执行任务
+let taskExecutionQueue: any[] = []; // 任务执行队列
+
 // 添加服务端状态跟踪
 let serverOffline = false;
 let lastServerErrorTime = 0;
+
+// 添加全局错误抑制机制
+let lastHeartbeatErrorTime = 0;
+let lastStatusSyncErrorTime = 0;
+let lastHeartbeatSuccessTime = 0;
+const ERROR_SUPPRESS_INTERVAL = 30000; // 30秒错误抑制间隔
+const HEARTBEAT_SUCCESS_INTERVAL = 300000; // 5分钟心跳成功日志间隔
 
 // 添加精准状态跟踪
 let lastStatusUpdateTime = 0;
@@ -41,6 +52,8 @@ let lastReportedStatus: 'Running' | 'Idle' = 'Idle';
 let wsClient: any = null;
 let useWebSocketScheduling = false;
 let globalWebSocketTask: any = null;
+let lastWebSocketErrorTime = 0;
+let webSocketRecoveryCheckInterval: NodeJS.Timeout | null = null;
 
 // WebSocket客户端类定义
 class NodeWebSocketClient {
@@ -48,11 +61,31 @@ class NodeWebSocketClient {
     private socket: any = null;
     private isConnected: boolean = false;
     private reconnectAttempts: number = 0;
-    private maxReconnectAttempts: number = 3;
-    private reconnectInterval: number = 10000; // 10秒
+    private maxReconnectAttempts: number = 3; // 减少重连次数，与服务端保持一致
+    private reconnectInterval: number = 10000; // 基础间隔10秒，与服务端保持一致
+    private maxReconnectInterval: number = 300000; // 最大间隔5分钟
+    private isReconnecting: boolean = false; // 防止重复重连
+    private messageQueue: any[] = []; // 消息队列
+    private maxQueueSize: number = 50; // 最大队列大小
+    private heartbeatInterval: number = 120000; // 心跳间隔2分钟，与服务端保持一致
+    private heartbeatTimer: NodeJS.Timeout | null = null; // 心跳定时器
+    private lastErrorTime: number = 0; // 上次错误时间
+    private errorSuppressInterval: number = 30000; // 错误抑制间隔30秒
 
     constructor(config: any) {
         this.config = config;
+    }
+
+    /**
+     * 检查是否应该抑制错误日志
+     */
+    private shouldSuppressError(): boolean {
+        const now = Date.now();
+        if (now - this.lastErrorTime < this.errorSuppressInterval) {
+            return true;
+        }
+        this.lastErrorTime = now;
+        return false;
     }
 
     /**
@@ -64,7 +97,19 @@ class NodeWebSocketClient {
             return;
         }
 
+        // 如果已经连接或正在连接，跳过
+        if (this.isConnected || (this.socket && this.socket.connected)) {
+            log('main', 'WebSocket', 'WebSocket已连接，跳过重复初始化');
+            return;
+        }
+
         try {
+            // 清理旧连接
+            if (this.socket) {
+                this.socket.disconnect();
+                this.socket = null;
+            }
+
             // 动态导入socket.io-client
             const io = require('socket.io-client');
             const serverUrl = this.config.apiServer.updateUrl;
@@ -73,13 +118,30 @@ class NodeWebSocketClient {
                     token: this.config.apiServer.token,
                     nodeName: this.config.apiServer.nodeName
                 },
-                transports: ['websocket', 'polling']
+                transports: ['polling', 'websocket'], // 与服务端保持一致
+                timeout: 30000, // 增加连接超时到30秒
+                forceNew: true, // 强制新连接
+                reconnection: true,
+                reconnectionAttempts: this.maxReconnectAttempts,
+                reconnectionDelay: this.reconnectInterval,
+                reconnectionDelayMax: this.maxReconnectInterval,
+                maxReconnectionAttempts: this.maxReconnectAttempts,
+                randomizationFactor: 0.5, // 重连随机化因子
+                autoConnect: true,
+                multiplex: false, // 禁用多路复用
+                forceBase64: false, // 不强制base64编码
+                timestampRequests: true, // 启用时间戳请求
+                timestampParam: 't',
+                policyPort: 843,
+                path: '/socket.io/'
             });
 
             this.setupEventListeners();
+            this.startHeartbeat();
             log('main', 'WebSocket', '🔌 WebSocket客户端初始化完成');
         } catch (error) {
             log('main', 'WebSocket', `❌ WebSocket初始化失败: ${error}`, 'error');
+            this.scheduleReconnect();
         }
     }
 
@@ -91,7 +153,9 @@ class NodeWebSocketClient {
             log('main', 'WebSocket', '✅ WebSocket连接成功');
             this.isConnected = true;
             this.reconnectAttempts = 0;
+            this.isReconnecting = false;
             this.notifyNodeReady();
+            this.processQueue(); // 处理队列中的消息
         });
 
         this.socket.on('disconnect', () => {
@@ -101,12 +165,18 @@ class NodeWebSocketClient {
         });
 
         this.socket.on('connect_error', (error: any) => {
-            log('main', 'WebSocket', `❌ WebSocket连接错误: ${error}`, 'error');
+            if (!this.shouldSuppressError()) {
+                log('main', 'WebSocket', `❌ WebSocket连接错误: ${error.message || error}`, 'error');
+            }
+            this.isConnected = false;
             this.scheduleReconnect();
         });
 
         this.socket.on('error', (error: any) => {
-            log('main', 'WebSocket', `❌ WebSocket错误: ${error}`, 'error');
+            if (!this.shouldSuppressError()) {
+                log('main', 'WebSocket', `❌ WebSocket错误: ${error.message || error}`, 'error');
+            }
+            this.isConnected = false;
         });
 
         this.socket.on('node_ready_confirmed', (data: any) => {
@@ -127,19 +197,89 @@ class NodeWebSocketClient {
         this.socket.on('task_completed_broadcast', (data: any) => {
             log('main', 'WebSocket', `✅ 任务完成广播: ${JSON.stringify(data)}`);
         });
+
+        this.socket.on('pong', (data: any) => {
+            // 静默处理pong响应，减少日志输出
+            // log('main', 'WebSocket', `🏓 收到pong响应: ${JSON.stringify(data)}`);
+        });
+    }
+
+    /**
+     * 安全发送消息，带队列和限流
+     */
+    safeEmit(event: string, data?: any) {
+        if (this.isConnected && this.socket) {
+            try {
+                this.socket.emit(event, data);
+            } catch (error) {
+                log('main', 'WebSocket', `❌ 发送消息失败: ${error}`, 'error');
+                this.addToQueue(event, data);
+            }
+        } else {
+            this.addToQueue(event, data);
+        }
+    }
+
+    /**
+     * 添加消息到队列
+     */
+    addToQueue(event: string, data?: any) {
+        if (this.messageQueue.length >= this.maxQueueSize) {
+            // 队列满了，移除最旧的消息
+            this.messageQueue.shift();
+        }
+        this.messageQueue.push({ event, data, timestamp: Date.now() });
+    }
+
+    /**
+     * 处理队列中的消息
+     */
+    processQueue() {
+        if (this.messageQueue.length === 0 || !this.isConnected) {
+            return;
+        }
+
+        const messages = this.messageQueue.splice(0, 10); // 每次处理最多10条消息
+        messages.forEach(({ event, data }) => {
+            try {
+                this.socket.emit(event, data);
+            } catch (error) {
+                log('main', 'WebSocket', `❌ 处理队列消息失败: ${error}`, 'error');
+            }
+        });
+    }
+
+    /**
+     * 开始心跳检测
+     */
+    startHeartbeat() {
+        this.heartbeatTimer = setInterval(() => {
+            if (this.socket && this.isConnected) {
+                // 静默发送ping，减少日志输出
+                this.safeEmit('ping');
+            }
+        }, this.heartbeatInterval);
+    }
+
+    /**
+     * 停止心跳检测
+     */
+    stopHeartbeat() {
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
     }
 
     /**
      * 通知节点准备就绪
      */
     notifyNodeReady() {
-        if (this.socket && this.isConnected) {
-            this.socket.emit('node_ready', {
-                node_name: this.config.apiServer.nodeName,
-                timestamp: new Date().toISOString()
-            });
-            log('main', 'WebSocket', '📡 已通知服务端节点准备就绪');
-        }
+        this.safeEmit('node_ready', {
+            node_name: this.config.apiServer.nodeName,
+            timestamp: new Date().toISOString()
+        });
+        log('main', 'WebSocket', '📡 已通知服务端节点准备就绪');
     }
 
 
@@ -147,59 +287,380 @@ class NodeWebSocketClient {
      * 发送任务状态更新
      */
     emitTaskStatusUpdate(taskId: string, status: string, nodeName: string, result: any = null) {
-        if (this.socket && this.isConnected) {
-            this.socket.emit('task_status_update', {
-                task_id: taskId,
-                status: status,
-                node_name: nodeName,
-                result: result,
-                timestamp: new Date().toISOString()
-            });
-            log('main', 'WebSocket', `📊 已发送任务状态更新: ${taskId} -> ${status}`);
-        }
+        this.safeEmit('task_status_update', {
+            task_id: taskId,
+            status: status,
+            node_name: nodeName,
+            result: result,
+            timestamp: new Date().toISOString()
+        });
+        // 静默发送任务状态更新，减少日志输出
+        // log('main', 'WebSocket', `📊 已发送任务状态更新: ${taskId} -> ${status}`);
     }
 
     /**
      * 发送任务完成通知
      */
     emitTaskCompleted(taskId: string, nodeName: string, result: any = {}) {
-        if (this.socket && this.isConnected) {
-            this.socket.emit('task_completed', {
-                task_id: taskId,
-                node_name: nodeName,
-                result: result,
-                timestamp: new Date().toISOString()
-            });
-            log('main', 'WebSocket', `✅ 已发送任务完成通知: ${taskId}`);
-        }
+        this.safeEmit('task_completed', {
+            task_id: taskId,
+            node_name: nodeName,
+            result: result,
+            timestamp: new Date().toISOString()
+        });
+        // 静默发送任务完成通知，减少日志输出
+        // log('main', 'WebSocket', `✅ 已发送任务完成通知: ${taskId}`);
     }
 
     /**
      * 安排重连
      */
     scheduleReconnect() {
+        if (this.isReconnecting) {
+            return; // 防止重复重连
+        }
+        
         if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.isReconnecting = true;
             this.reconnectAttempts++;
-            log('main', 'WebSocket', `🔄 尝试重连 (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+            
+            // 递增延迟策略：10s, 20s, 30s (与服务端保持一致)
+            const delay = Math.min(
+                this.reconnectInterval * this.reconnectAttempts,
+                this.maxReconnectInterval
+            );
+            
+            // 只在第一次重连时输出日志，后续重连抑制日志
+            if (this.reconnectAttempts === 1) {
+                log('main', 'WebSocket', `🔄 尝试重连 (${this.reconnectAttempts}/${this.maxReconnectAttempts})，${Math.round(delay/1000)}秒后重试...`);
+            }
             
             setTimeout(() => {
+                this.isReconnecting = false;
                 this.init();
-            }, this.reconnectInterval);
+            }, delay);
         } else {
-            log('main', 'WebSocket', '❌ 达到最大重连次数，停止重连', 'warn');
+            // 只在达到最大重连次数时输出一次日志
+            if (!this.shouldSuppressError()) {
+                log('main', 'WebSocket', '❌ 达到最大重连次数，停止重连。将使用HTTP轮询模式', 'warn');
+            }
+            // 停止WebSocket调度，回退到HTTP轮询
+            useWebSocketScheduling = false;
+            
+            // 记录错误时间，启动服务端恢复检测
+            lastWebSocketErrorTime = Date.now();
+            startServerRecoveryCheck();
         }
+    }
+
+    /**
+     * 检查连接状态
+     */
+    get connected() {
+        return this.socket && this.socket.connected;
     }
 
     /**
      * 销毁连接
      */
     destroy() {
+        this.stopHeartbeat();
         if (this.socket) {
             this.socket.disconnect();
             this.socket = null;
         }
         this.isConnected = false;
+        this.isReconnecting = false;
+        this.reconnectAttempts = 0;
+        this.messageQueue = [];
         log('main', 'WebSocket', '🔌 WebSocket连接已销毁');
+    }
+}
+
+/**
+ * 执行单个任务函数
+ */
+async function executeSingleTask(taskData: any) {
+    // 严格检查当前任务状态，防止与正在执行的任务冲突
+    if (isTaskRunning) {
+        log('main', '执行单个任务', `❌ 拒绝执行单个任务：当前有任务正在执行中`, 'warn');
+        log('main', '执行单个任务', `当前状态: isTaskRunning=${isTaskRunning}, shouldStopTask=${shouldStopTask}`);
+        log('main', '执行单个任务', '等待当前任务完成后再接受新的单个任务指令', 'warn');
+        // 确认命令已接收但拒绝执行
+        await confirmCommandToServer('RUN_TASK');
+        return;
+    }
+
+    // 状态已在主循环中设置，这里不需要重复设置
+    try {
+        shouldStopTask = false; // 重置停止标志
+
+        log('main', '执行单个任务', `开始执行任务 ${taskData.task_id}: ${taskData.task_type}`);
+
+        // 对于定时任务，直接调用executeTasks执行完整的任务流程
+        await executeTasks();
+        log('main', '执行单个任务', `任务 ${taskData.task_id} 执行完成`);
+    } catch (error) {
+        log('main', '执行单个任务', `执行任务时出错: ${String(error)}`, 'error');
+    } finally {
+        // 注意：不要在这里重置isTaskRunning，因为任务可能还在执行中
+        // isTaskRunning会在主循环中重置
+    }
+}
+
+/**
+ * 任务执行函数
+ */
+async function executeTasks() {
+    // 状态已在主循环中设置，这里不需要重复设置
+    const taskResult = {
+        success: true,
+        account_count: 0,
+        total_points: 0,
+        accounts: [] as Array<{email: string, points_gained: number, final_points: number}>
+    };
+    
+    try {
+        shouldStopTask = false; // 重置停止标志
+
+        const config = loadConfig();
+        const accounts = await loadAccounts();
+        if (accounts.length > 0) {
+            await runHotSearchScript(accounts);
+            
+            // 严格按账户顺序执行：每个账户先完成桌面端，再完成移动端
+            log('main', '主流程', '开始按账户顺序执行任务...');
+            
+            for (const account of accounts) {
+                // 检查是否需要停止
+                if (shouldStopTask) {
+                    log('main', '主流程', `检测到停止指令，终止账户 ${account.email} 的任务`, 'warn');
+                    break;
+                }
+                
+                log('main', '主流程', `开始处理账户: ${account.email}`);
+                
+                // 获取今日初始积分
+                const todayStr = new Util().getYYYYMMDD();
+                const dailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
+                let initialPointsToday = 0;
+                
+                if (dailyPointsData && dailyPointsData.date === todayStr) {
+                    initialPointsToday = dailyPointsData.initialPoints;
+                    log('main', '主流程', `[${account.email}] 使用已保存的今日初始积分: ${initialPointsToday}`);
+                } else {
+                    log('main', '主流程', `[${account.email}] 未找到今日初始积分记录，将在登录后获取当前积分作为初始值`);
+                }
+                
+                // 先执行桌面端任务
+                log('main', '主流程', `账户 ${account.email} 开始执行桌面端任务...`);
+                await runTasksForAccounts([account], config, 'desktop');
+                log('main', '主流程', `账户 ${account.email} 桌面端任务执行完成`);
+                
+                // 检查是否需要停止
+                if (shouldStopTask) {
+                    log('main', '主流程', `检测到停止指令，跳过账户 ${account.email} 的移动端任务`, 'warn');
+                    continue;
+                }
+                
+                // 再执行移动端任务
+                log('main', '主流程', `账户 ${account.email} 开始执行移动端任务...`);
+                await runTasksForAccounts([account], config, 'mobile');
+                log('main', '主流程', `账户 ${account.email} 移动端任务执行完成`);
+                
+                // 获取最终积分并上报
+                const finalDailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
+                if (finalDailyPointsData && finalDailyPointsData.date === todayStr) {
+                    const finalPoints = finalDailyPointsData.desktopFinalPoints || finalDailyPointsData.initialPoints || 0;
+                    const dailyGain = initialPointsToday > 0 ? finalPoints - initialPointsToday : 0;
+                    
+                    log('main', '主流程', `[${account.email}] 积分统计 - 初始: ${initialPointsToday}, 最终: ${finalPoints}, 今日收益: ${dailyGain}`);
+                    
+                    // 记录账户执行结果
+                    taskResult.accounts.push({
+                        email: account.email,
+                        points_gained: dailyGain,
+                        final_points: finalPoints
+                    });
+                    taskResult.total_points += dailyGain;
+                    
+                    // 上报积分数据
+                    const bot = new MicrosoftRewardsBot();
+                    bot.config = config;
+                    bot.account = account;
+                    bot.axios = new Axios(account.proxy);
+                    
+                    await sendFinalUpdate(bot, {
+                        email: account.email,
+                        total_points: finalPoints,
+                        daily_gain: dailyGain,
+                        desktop_gain: 0, // 子进程执行，无法获取详细收益
+                        mobile_gain: 0   // 子进程执行，无法获取详细收益
+                    });
+                }
+                
+                log('main', '主流程', `账户 ${account.email} 所有任务执行完成`);
+            }
+            
+            // 更新任务结果
+            taskResult.account_count = taskResult.accounts.length;
+            log('main', '主流程', '所有账户任务执行完成');
+        } else {
+            log('main', '主流程', '未获取到分配的账户，本轮任务结束。');
+        }
+
+        // 注意：不要在这里重置isTaskRunning，因为任务可能还在执行中
+        // isTaskRunning会在主循环中重置
+    } catch (error) {
+        log('main', '任务执行', `执行任务时出错: ${String(error)}`, 'error');
+        taskResult.success = false;
+        // 注意：不要在这里重置isTaskRunning，因为任务可能还在执行中
+        // isTaskRunning会在主循环中重置
+    } finally {
+        // 注意：不要在这里重置isTaskRunning，因为任务可能还在执行中
+        // isTaskRunning会在任务真正完成时由executeTasks函数重置
+        if (shouldStopTask) {
+            log('main', '主流程', '检测到停止指令，保持任务运行状态');
+        }
+    }
+    
+    return taskResult;
+}
+
+/**
+ * 任务执行隔离函数 - 确保任务执行不受WebSocket连接状态影响
+ */
+async function executeTaskIsolated(task: any) {
+    // 检查任务执行锁
+    if (taskExecutionLock) {
+        log('main', '任务隔离', '⚠️ 有任务正在执行中，将任务加入队列', 'warn');
+        taskExecutionQueue.push(task);
+        return;
+    }
+    
+    // 设置执行锁
+    taskExecutionLock = true;
+    isTaskRunning = true;
+    
+    try {
+        log('main', '任务隔离', `🚀 开始执行隔离任务: ${task.task_id} (${task.command})`);
+        
+        // 尝试发送状态更新，但不依赖WebSocket连接
+        if (wsClient && wsClient.connected) {
+            wsClient.emitTaskStatusUpdate(task.task_id, 'executing', task.node_name);
+        }
+        // 静默处理WebSocket未连接的情况，减少日志输出
+        
+        await updateActivityStatus('Running');
+        
+        // 根据命令类型执行相应任务
+        let taskResult = {
+            success: true,
+            account_count: 0,
+            total_points: 0,
+            accounts: [] as Array<{email: string, points_gained: number, final_points: number}>
+        };
+        
+        if (task.command === 'RUN_TASKS') {
+            taskResult = await executeTasks();
+        } else if (task.command === 'RUN_TASK') {
+            await executeSingleTask(task.command_data);
+        }
+        
+        // 任务完成 - 尝试发送完成状态，但不依赖WebSocket连接
+        if (wsClient && wsClient.connected) {
+            wsClient.emitTaskStatusUpdate(task.task_id, 'completed', task.node_name, taskResult);
+            wsClient.emitTaskCompleted(task.task_id, task.node_name, taskResult);
+        }
+        // 静默处理WebSocket未连接的情况，减少日志输出
+        
+        log('main', '任务隔离', `✅ 隔离任务完成: ${task.task_id}`);
+        
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        log('main', '任务隔离', `❌ 隔离任务执行失败: ${errorMessage}`, 'error');
+        
+        // 尝试发送错误状态，但不依赖WebSocket连接
+        if (wsClient && wsClient.connected) {
+            wsClient.emitTaskStatusUpdate(task.task_id, 'failed', task.node_name, { error: errorMessage });
+        }
+        // 静默处理WebSocket未连接的情况，减少日志输出
+    } finally {
+        // 重置状态
+        isTaskRunning = false;
+        taskExecutionLock = false;
+        await updateActivityStatus('Idle');
+        
+        // 处理队列中的下一个任务
+        if (taskExecutionQueue.length > 0) {
+            const nextTask = taskExecutionQueue.shift();
+            log('main', '任务隔离', `📋 处理队列中的下一个任务: ${nextTask.task_id}`);
+            setTimeout(() => executeTaskIsolated(nextTask), 1000); // 1秒后执行下一个任务
+        }
+    }
+}
+
+/**
+ * 启动服务端恢复检测
+ */
+function startServerRecoveryCheck() {
+    if (webSocketRecoveryCheckInterval) {
+        return; // 已经在检测中
+    }
+    
+    log('main', 'WebSocket', '🔍 启动服务端恢复检测，每30秒检查一次');
+    
+    webSocketRecoveryCheckInterval = setInterval(async () => {
+        await checkServerRecovery();
+    }, 30000); // 每30秒检查一次
+}
+
+/**
+ * 检查服务端是否恢复
+ */
+async function checkServerRecovery() {
+    try {
+        const config = loadConfig();
+        const apiConfig = config.apiServer;
+        if (!apiConfig || !apiConfig.enabled || !apiConfig.updateUrl) {
+            return;
+        }
+        
+        const response = await axios.get(`${apiConfig.updateUrl}bot_api/checkin`, {
+            headers: {
+                'Authorization': `Bearer ${apiConfig.token}`,
+                'Content-Type': 'application/json'
+            },
+            timeout: 5000
+        });
+        
+        if (response.status === 200) {
+            log('main', 'WebSocket', '✅ 检测到服务端已恢复，尝试重新连接WebSocket');
+            lastWebSocketErrorTime = 0;
+            
+            // 重新启用WebSocket调度
+            useWebSocketScheduling = true;
+            if (wsClient) {
+                wsClient.reconnectAttempts = 0; // 重置重连计数
+                wsClient.init();
+            }
+            
+            // 停止恢复检测
+            if (webSocketRecoveryCheckInterval) {
+                clearInterval(webSocketRecoveryCheckInterval);
+                webSocketRecoveryCheckInterval = null;
+            }
+        }
+    } catch (error) {
+        // 服务端仍未恢复，继续等待
+        const timeSinceError = Date.now() - lastWebSocketErrorTime;
+        if (timeSinceError > 600000) { // 10分钟后停止检测
+            log('main', 'WebSocket', '⏰ 服务端恢复检测超时，停止检测', 'warn');
+            if (webSocketRecoveryCheckInterval) {
+                clearInterval(webSocketRecoveryCheckInterval);
+                webSocketRecoveryCheckInterval = null;
+            }
+        }
     }
 }
 
@@ -255,25 +716,32 @@ async function checkInNode() {
         checkinUrl.pathname = '/bot_api/checkin';
 
         // 确保使用正确的UTC时间戳，不受系统时区影响
-        const now = new Date();
-        const utcTimestamp = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString();
+        const currentTime = new Date();
+        const utcTimestamp = new Date(currentTime.getTime() - currentTime.getTimezoneOffset() * 60000).toISOString();
 
-        const payload: { node_name: string; heartbeat_timeout?: number; bot_status: string; timestamp: string } = {
+        const payload: { node_name: string; heartbeat_timeout?: number; activity_status: string; timestamp: string; isTaskRunning: boolean } = {
             node_name: apiConfig.nodeName,
-            bot_status: isTaskRunning ? 'Running' : 'Idle',
-            timestamp: utcTimestamp
+            activity_status: isTaskRunning ? 'Running' : 'Idle',
+            timestamp: utcTimestamp,
+            isTaskRunning: isTaskRunning
         };
         
-        // 添加状态日志，便于调试
-        log('main', '节点管理', `📊 当前任务状态: isTaskRunning=${isTaskRunning}, 上报状态: ${payload.bot_status}`);
+        // 只在状态变化时输出详细日志
+        if (lastReportedStatus !== payload.activity_status) {
+            log('main', '节点管理', `📊 状态变化: ${lastReportedStatus} → ${payload.activity_status}`);
+            lastReportedStatus = payload.activity_status as 'Running' | 'Idle';
+        }
 
         if (apiConfig.heartbeatTimeout) {
             payload.heartbeat_timeout = utils.stringToMs(apiConfig.heartbeatTimeout) / 1000;
         }
 
-        log('main', '节点管理', `📡 向中心服务器签到/发送心跳: ${apiConfig.nodeName}`);
-        log('main', '节点管理', `🌐 服务地址: ${checkinUrl.toString()}`);
-        log('main', '节点管理', `📊 节点状态: ${payload.bot_status}`);
+        // 抑制频繁的心跳发送日志
+        const now = Date.now();
+        if (now - lastHeartbeatSuccessTime > HEARTBEAT_SUCCESS_INTERVAL) {
+            log('main', '节点管理', `📡 向中心服务器签到/发送心跳: ${apiConfig.nodeName}`);
+            log('main', '节点管理', `🌐 服务地址: ${checkinUrl.toString()}`);
+        }
         
         await axios.post(checkinUrl.toString(), payload, {
             headers: { 'Authorization': `Bearer ${apiConfig.token}` },
@@ -286,9 +754,15 @@ async function checkInNode() {
             log('main', '节点管理', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
             serverOffline = false;
             lastServerErrorTime = 0;
+            lastHeartbeatErrorTime = 0; // 重置错误时间
+            lastHeartbeatSuccessTime = 0; // 重置成功时间，允许输出恢复日志
         }
         
-        log('main', '节点管理', '✅ 节点签到/心跳成功');
+        // 抑制频繁的心跳成功日志
+        if (now - lastHeartbeatSuccessTime > HEARTBEAT_SUCCESS_INTERVAL) {
+            log('main', '节点管理', '✅ 节点签到/心跳成功');
+            lastHeartbeatSuccessTime = now;
+        }
     } catch (error) {
         let errorMessage: string;
         let logLevel: 'warn' | 'error' = 'warn';
@@ -333,11 +807,16 @@ async function checkInNode() {
             logLevel = 'warn';
         }
         
-        log('main', '节点管理', `❌ 节点签到/心跳失败: ${errorMessage}`, logLevel);
-        
-        // 只在严重错误时提示检查配置
-        if (logLevel === 'error') {
-            log('main', '节点管理', `🔧 请检查网络连接和服务端状态`, 'warn');
+        // 抑制重复的心跳错误日志
+        const errorTime = Date.now();
+        if (errorTime - lastHeartbeatErrorTime > ERROR_SUPPRESS_INTERVAL) {
+            log('main', '节点管理', `❌ 节点签到/心跳失败: ${errorMessage}`, logLevel);
+            lastHeartbeatErrorTime = errorTime;
+            
+            // 只在严重错误时提示检查配置
+            if (logLevel === 'error') {
+                log('main', '节点管理', `🔧 请检查网络连接和服务端状态`, 'warn');
+            }
         }
         
         // 确保心跳失败不会影响主循环继续运行
@@ -411,7 +890,10 @@ async function updateActivityStatus(status: 'Running' | 'Idle') {
     
     // 检查状态是否真的发生了变化
     if (lastReportedStatus === status) {
-        log('main', '主流程', `📊 状态未变化，跳过上报: [${status}]`);
+        // 即使状态未变化，也要更新时间戳，确保心跳能正确同步
+        lastStatusUpdateTime = Date.now();
+        // 静默处理状态未变化的情况，减少日志输出
+        // log('main', '主流程', `📊 状态未变化，跳过上报: [${status}]`);
         return;
     }
     
@@ -453,7 +935,7 @@ async function syncStatusPrecisely() {
         return;
     }
     
-    // 如果状态未变化，但超过30秒未更新，也进行同步
+    // 如果状态未变化，但超过30秒未更新，也进行同步（静默同步，不输出日志）
     if (now - lastStatusUpdateTime > 30000) {
         try {
             const apiUrl = new URL(apiConfig.updateUrl);
@@ -469,10 +951,16 @@ async function syncStatusPrecisely() {
             );
             
             lastStatusUpdateTime = now;
-            log('main', '状态同步', `📊 状态同步完成: [${currentStatus}]`);
+            // 静默同步，不输出重复的状态日志
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            log('main', '状态同步', `❌ 状态同步失败: ${errorMessage}`, 'warn');
+            const syncErrorTime = Date.now();
+            
+            // 抑制重复的状态同步错误日志
+            if (syncErrorTime - lastStatusSyncErrorTime > ERROR_SUPPRESS_INTERVAL) {
+                log('main', '状态同步', `❌ 状态同步失败: ${errorMessage}`, 'warn');
+                lastStatusSyncErrorTime = syncErrorTime;
+            }
         }
     }
 }
@@ -874,6 +1362,8 @@ export class MicrosoftRewardsBot {
             if (dailyPointsData && dailyPointsData.date === todayStr) {
                 initialPointsToday = dailyPointsData.initialPoints;
                 log(false, '主流程', `[${account.email}] 使用已保存的今日初始积分: ${initialPointsToday}`);
+            } else {
+                log(false, '主流程', `[${account.email}] 未找到今日初始积分记录，将在登录后获取当前积分作为初始值`);
             }
             
             // 添加停止检查
@@ -1155,12 +1645,8 @@ async function runTasksForAccounts(accounts: Account[], config: Config, taskType
         log('main', '主进程-WORKER', '所有子进程已完成');
     }
     
-    // 任务完成后，确保状态被重置
-    if (isTaskRunning && !shouldStopTask) {
-        log('main', '主进程-WORKER', '任务执行完成，重置全局任务状态...', 'warn');
-        isTaskRunning = false;
-        log('main', '主进程-WORKER', '全局任务状态已重置为 false');
-    }
+    // 注意：不要在这里重置isTaskRunning，因为任务可能还在执行中
+    // isTaskRunning会在主循环中重置
 }
 
 async function main() {
@@ -1298,11 +1784,11 @@ async function main() {
         const heartbeatIntervalMs = utils.stringToMs(config.apiServer?.heartbeatInterval || '5m');
         setInterval(checkInNode, heartbeatIntervalMs);
         
-        // 启动精准状态同步（每30秒）
+        // 移除精准状态同步，统一使用心跳接口
         if (statusUpdateInterval) {
             clearInterval(statusUpdateInterval);
+            statusUpdateInterval = null;
         }
-        statusUpdateInterval = setInterval(syncStatusPrecisely, 30000);
         
         // 初始化WebSocket任务调度（可选）
         try {
@@ -1333,135 +1819,6 @@ async function main() {
             }
         }
 
-        // 执行单个任务函数
-        async function executeSingleTask(taskData: any) {
-            // 严格检查当前任务状态，防止与正在执行的任务冲突
-            if (isTaskRunning) {
-                log('main', '执行单个任务', `❌ 拒绝执行单个任务：当前有任务正在执行中`, 'warn');
-                log('main', '执行单个任务', `当前状态: isTaskRunning=${isTaskRunning}, shouldStopTask=${shouldStopTask}`);
-                log('main', '执行单个任务', '等待当前任务完成后再接受新的单个任务指令', 'warn');
-                // 确认命令已接收但拒绝执行
-                await confirmCommandToServer('RUN_TASK');
-                return;
-            }
-
-            // 状态已在主循环中设置，这里不需要重复设置
-            try {
-                shouldStopTask = false; // 重置停止标志
-
-                log('main', '执行单个任务', `开始执行任务 ${taskData.task_id}: ${taskData.task_type}`);
-
-                // 对于定时任务，直接调用executeTasks执行完整的任务流程
-                await executeTasks();
-                log('main', '执行单个任务', `任务 ${taskData.task_id} 执行完成`);
-            } catch (error) {
-                log('main', '执行单个任务', `执行任务时出错: ${String(error)}`, 'error');
-            } finally {
-                if (!shouldStopTask) {
-                    await updateActivityStatus('Idle');
-                    log('main', '执行单个任务', '任务执行完毕，返回待机状态。');
-                }
-            }
-        }
-
-        // 任务执行函数
-        async function executeTasks() {
-            // 状态已在主循环中设置，这里不需要重复设置
-            try {
-                shouldStopTask = false; // 重置停止标志
-
-                const accounts = await loadAccounts();
-                if (accounts.length > 0) {
-                    await runHotSearchScript(accounts);
-                    
-                    // 严格按账户顺序执行：每个账户先完成桌面端，再完成移动端
-                    log('main', '主流程', '开始按账户顺序执行任务...');
-                    
-                    for (const account of accounts) {
-                        // 检查是否需要停止
-                        if (shouldStopTask) {
-                            log('main', '主流程', `检测到停止指令，终止账户 ${account.email} 的任务`, 'warn');
-                            break;
-                        }
-                        
-                        log('main', '主流程', `开始处理账户: ${account.email}`);
-                        
-                        // 获取今日初始积分
-                        const todayStr = new Util().getYYYYMMDD();
-                        const dailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
-                        let initialPointsToday = 0;
-                        
-                        if (dailyPointsData && dailyPointsData.date === todayStr) {
-                            initialPointsToday = dailyPointsData.initialPoints;
-                            log('main', '主流程', `[${account.email}] 使用已保存的今日初始积分: ${initialPointsToday}`);
-                        }
-                        
-                        // 先执行桌面端任务
-                        log('main', '主流程', `账户 ${account.email} 开始执行桌面端任务...`);
-                        await runTasksForAccounts([account], config, 'desktop');
-                        log('main', '主流程', `账户 ${account.email} 桌面端任务执行完成`);
-                        
-                        // 检查是否需要停止
-                        if (shouldStopTask) {
-                            log('main', '主流程', `检测到停止指令，跳过账户 ${account.email} 的移动端任务`, 'warn');
-                            continue;
-                        }
-                        
-                        // 再执行移动端任务
-                        log('main', '主流程', `账户 ${account.email} 开始执行移动端任务...`);
-                        await runTasksForAccounts([account], config, 'mobile');
-                        log('main', '主流程', `账户 ${account.email} 移动端任务执行完成`);
-                        
-                        // 获取最终积分并上报
-                        const finalDailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
-                        if (finalDailyPointsData && finalDailyPointsData.date === todayStr) {
-                            const finalPoints = finalDailyPointsData.desktopFinalPoints || finalDailyPointsData.initialPoints || 0;
-                            const dailyGain = initialPointsToday > 0 ? finalPoints - initialPointsToday : 0;
-                            
-                            log('main', '主流程', `[${account.email}] 积分统计 - 初始: ${initialPointsToday}, 最终: ${finalPoints}, 今日收益: ${dailyGain}`);
-                            
-                            // 上报积分数据
-                            const bot = new MicrosoftRewardsBot();
-                            bot.config = config;
-                            bot.account = account;
-                            bot.axios = new Axios(account.proxy);
-                            
-                            await sendFinalUpdate(bot, {
-                                email: account.email,
-                                total_points: finalPoints,
-                                daily_gain: dailyGain,
-                                desktop_gain: 0, // 子进程执行，无法获取详细收益
-                                mobile_gain: 0   // 子进程执行，无法获取详细收益
-                            });
-                        }
-                        
-                        log('main', '主流程', `账户 ${account.email} 所有任务执行完成`);
-                    }
-                    
-                    log('main', '主流程', '所有账户任务执行完成');
-                } else {
-                    log('main', '主流程', '未获取到分配的账户，本轮任务结束。');
-                }
-
-                if (!shouldStopTask) {
-                    await updateActivityStatus('Idle');
-                    log('main', '主流程', '所有任务执行完毕，返回待机状态。');
-                }
-            } catch (error) {
-                log('main', '任务执行', `执行任务时出错: ${String(error)}`, 'error');
-                if (!shouldStopTask) {
-                    await updateActivityStatus('Idle');
-                }
-                    } finally {
-            // 确保状态总是被重置，除非明确要求保持运行状态
-            if (!shouldStopTask) {
-                isTaskRunning = false;
-                log('main', '主流程', '任务执行状态已重置为 false');
-            } else {
-                log('main', '主流程', '检测到停止指令，保持任务运行状态');
-            }
-        }
-        }
 
         // 步骤 5: 开始主循环，监听任务
         let consecutiveErrors = 0;
@@ -1503,6 +1860,9 @@ async function main() {
         // 确保进程退出时清理监控
         process.on('exit', () => {
             clearInterval(loopMonitor);
+            if (webSocketRecoveryCheckInterval) {
+                clearInterval(webSocketRecoveryCheckInterval);
+            }
         });
         
         while (true) {
@@ -1515,63 +1875,22 @@ async function main() {
                     const task = globalWebSocketTask;
                     globalWebSocketTask = null; // 清除任务
                     
-                    log('main', '主流程', `📋 开始处理WebSocket任务: ${task.task_id} (${task.command})`);
+                    log('main', '主流程', `📋 收到WebSocket任务: ${task.task_id} (${task.command})`);
                     
-                    try {
-                        // 更新状态为运行中
-                        if (wsClient) {
-                            wsClient.emitTaskStatusUpdate(task.task_id, 'executing', task.node_name);
-                        }
-                        await updateActivityStatus('Running');
-                        
-                        // 根据命令类型执行相应任务
-                        if (task.command === 'RUN_TASKS') {
-                            await executeTasks();
-                        } else if (task.command === 'RUN_TASK') {
-                            await executeSingleTask(task.command_data);
-                        }
-                        
-                        // 任务完成
-                        if (wsClient) {
-                            wsClient.emitTaskStatusUpdate(task.task_id, 'completed', task.node_name, { success: true });
-                            wsClient.emitTaskCompleted(task.task_id, task.node_name, { success: true });
-                        }
-                        await updateActivityStatus('Idle');
-                        
-                        log('main', '主流程', `✅ WebSocket任务完成: ${task.task_id}`);
-                        
-                    } catch (error) {
-                        const errorMessage = error instanceof Error ? error.message : String(error);
-                        log('main', '主流程', `❌ WebSocket任务执行失败: ${errorMessage}`, 'error');
-                        
-                        if (wsClient) {
-                            wsClient.emitTaskStatusUpdate(task.task_id, 'error', task.node_name, { error: errorMessage });
-                        }
-                        await updateActivityStatus('Idle');
-                    }
+                    // 使用隔离执行函数，确保任务执行不受WebSocket连接状态影响
+                    executeTaskIsolated(task);
                 }
                 
                 // 如果使用WebSocket调度，跳过轮询
-                if (useWebSocketScheduling && wsClient && wsClient.isConnected) {
+                if (useWebSocketScheduling && wsClient && wsClient.connected) {
                     await new Promise(resolve => setTimeout(resolve, 5000)); // 等待5秒
                     continue;
                 }
                 // 重置连续错误计数
                 consecutiveErrors = 0;
-                // [新增] 状态健康检查：如果任务状态卡死，自动恢复
-                if (isTaskRunning && !shouldStopTask) {
-                    // 检查是否有实际的子进程在运行
-                    const hasActiveProcesses = process.listenerCount('exit') > 0 || 
-                                            process.listenerCount('uncaughtException') > 0 ||
-                                            process.listenerCount('unhandledRejection') > 0;
-                    
-                    if (!hasActiveProcesses) {
-                        log('main', '主流程', '检测到任务状态卡死，正在自动恢复...', 'warn');
-                        isTaskRunning = false;
-                        await updateActivityStatus('Idle');
-                        log('main', '主流程', '任务状态已自动恢复为 Idle');
-                    }
-                }
+                // [修复] 移除错误的状态健康检查逻辑
+                // 原来的逻辑会错误地重置任务状态，导致任务执行时显示Idle
+                // 任务状态应该只在主循环的finally块中重置
                 
                 // 移除长轮询请求指令的日志，减少非关键信息输出
                 const commandUrl = new URL(config.apiServer.updateUrl);
@@ -1608,12 +1927,10 @@ async function main() {
                         } catch (err) {
                             log('main', '任务执行', `任务执行出错: ${String(err)}`, 'error');
                         } finally {
-                            // 确保状态总是被重置
-                            if (!shouldStopTask) {
-                                isTaskRunning = false;
-                                await updateActivityStatus('Idle');
-                                log('main', '主流程', '任务执行完成，状态已重置为 false');
-                            }
+                            // 任务完成后才重置状态
+                            isTaskRunning = false; // 重置任务运行状态
+                            await updateActivityStatus('Idle');
+                            log('main', '主流程', '任务执行完成，状态已重置为 Idle');
                         }
                         // 确认命令已接收
                         await confirmCommandToServer('RUN_TASKS');
@@ -1641,12 +1958,10 @@ async function main() {
                         } catch (err) {
                             log('main', '执行单个任务', `单个任务执行出错: ${String(err)}`, 'error');
                         } finally {
-                            // 确保状态总是被重置
-                            if (!shouldStopTask) {
-                                isTaskRunning = false;
-                                await updateActivityStatus('Idle');
-                                log('main', '主流程', '单个任务执行完成，状态已重置为 false');
-                            }
+                            // 任务完成后才重置状态
+                            isTaskRunning = false; // 重置任务运行状态
+                            await updateActivityStatus('Idle');
+                            log('main', '主流程', '单个任务执行完成，状态已重置为 Idle');
                         }
                         // 确认命令已接收
                         await confirmCommandToServer('RUN_TASK');
@@ -1692,7 +2007,11 @@ async function main() {
                         if (status >= 500) {
                             // 5xx服务器错误，延长重试间隔
                             retryDelay = 60000; // 1分钟
-                            log('main', '主流程', `服务器错误，将在${retryDelay/1000}秒后重试`, 'warn');
+                // 抑制重复的服务器错误日志
+                const currentTime = Date.now();
+                if (currentTime - lastServerErrorTime > ERROR_SUPPRESS_INTERVAL) {
+                    log('main', '主流程', `服务器错误，将在${retryDelay/1000}秒后重试`, 'warn');
+                }
                             // 标记服务端为离线状态
                             if (!serverOffline) {
                                 serverOffline = true;
@@ -1726,7 +2045,11 @@ async function main() {
                     retryDelay = 30000; // 其他错误30秒重试
                 }
                 
-                log('main', '主流程', `主循环出错 (${consecutiveErrors}/${maxConsecutiveErrors}): ${errorMessage}`, 'warn');
+                // 抑制重复的主循环错误日志
+                const errorTime = Date.now();
+                if (errorTime - lastServerErrorTime > ERROR_SUPPRESS_INTERVAL) {
+                    log('main', '主流程', `主循环出错 (${consecutiveErrors}/${maxConsecutiveErrors}): ${errorMessage}`, 'warn');
+                }
                 
                 // 检查连续错误次数
                 if (consecutiveErrors >= maxConsecutiveErrors) {

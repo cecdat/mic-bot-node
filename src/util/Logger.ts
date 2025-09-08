@@ -18,8 +18,8 @@ export async function log(isMobile: boolean | 'main', title: string, message: st
     // 过滤非关键信息日志，减少输出
     const nonCriticalTitles = [
         '搜索-随机滚动', '搜索-随机点击', '搜索-必应', '搜索-资源清理',
-        '浏览器', '主流程', '内存监控', '配置加载', '节点管理',
-        '热搜脚本', '任务执行', '执行单个任务', '主流程-WORKER'
+        '浏览器', '内存监控', '配置加载', '节点管理',
+        '热搜脚本', '主流程-WORKER'
     ];
     
     // 如果是非关键信息且不是错误或警告，则跳过
