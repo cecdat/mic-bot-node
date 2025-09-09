@@ -13,6 +13,7 @@ import { loadAccounts, loadConfig, loadNodeConfig, loadDailyPoints, saveDailyPoi
 import { LogPusher } from './util/LogPusher';
 import { accountStatusManager } from './util/AccountStatusManager';
 import { aiOrchestrator } from './util/AIOrcestrator';
+import { FailedTaskManager } from './util/FailedTaskManager';
 import { Login } from './functions/Login';
 import { Workers } from './functions/Workers';
 import Activities from './functions/Activities';
@@ -27,10 +28,232 @@ import { Config } from './interface/Config';
 let isTaskRunning = false;
 let shouldStopTask = false;
 let lastConfirmedCommand: string | null = null;
+let failedTaskManager: FailedTaskManager | null = null;
 
 // 任务执行隔离机制
 let taskExecutionLock = false; // 防止重复执行任务
 let taskExecutionQueue: any[] = []; // 任务执行队列
+
+/**
+ * 初始化失败任务管理器
+ */
+function initializeFailedTaskManager(sessionPath: string): void {
+    if (!failedTaskManager) {
+        failedTaskManager = new FailedTaskManager(sessionPath, 3);
+        log('main', '失败任务管理', '失败任务管理器已初始化');
+    }
+}
+
+/**
+ * 添加失败任务
+ */
+function addFailedTask(accountEmail: string, taskType: 'search' | 'mobile' | 'desktop', reason: string, taskData?: any): void {
+    if (!failedTaskManager) {
+        log('main', '失败任务管理', '失败任务管理器未初始化', 'warn');
+        return;
+    }
+
+    failedTaskManager.addFailedTask({
+        accountEmail,
+        taskType,
+        reason,
+        maxRetries: 3,
+        taskData
+    });
+}
+
+/**
+ * 重试失败任务
+ */
+async function retryFailedTasks(accountEmail: string): Promise<{ success: number; failed: number }> {
+    if (!failedTaskManager) {
+        log('main', '失败任务管理', '失败任务管理器未初始化', 'warn');
+        return { success: 0, failed: 0 };
+    }
+
+    log('main', '失败任务管理', `开始重试账户 ${accountEmail} 的失败任务`);
+
+    const result = await failedTaskManager.retryFailedTasksForAccount(accountEmail, async (task) => {
+        try {
+            log('main', '失败任务管理', `重试任务: ${task.taskType} - ${task.reason}`);
+            
+            // 根据任务类型执行重试
+            switch (task.taskType) {
+                case 'search':
+                    return await retrySearchTask(task);
+                case 'mobile':
+                    return await retryMobileTask(task);
+                case 'desktop':
+                    return await retryDesktopTask(task);
+                default:
+                    log('main', '失败任务管理', `未知任务类型: ${task.taskType}`, 'warn');
+                    return false;
+            }
+        } catch (error) {
+            log('main', '失败任务管理', `重试任务异常: ${error}`, 'error');
+            return false;
+        }
+    });
+
+    log('main', '失败任务管理', `账户 ${accountEmail} 重试完成: 成功 ${result.success} 个，失败 ${result.failed} 个`);
+    return result;
+}
+
+/**
+ * 重试搜索任务
+ */
+async function retrySearchTask(task: any): Promise<boolean> {
+    try {
+        log('main', '失败任务管理', `重试搜索任务: ${task.reason}`);
+        
+        // 创建新的bot实例来执行重试
+        const bot = new MicrosoftRewardsBot();
+        bot.account = { email: task.accountEmail } as any;
+        
+        // 初始化失败任务管理器
+        bot.workers.initializeFailedTaskManager(bot.config.sessionPath);
+        
+        // 根据任务数据执行重试
+        if (task.taskData && task.taskData.activity) {
+            const activity = task.taskData.activity;
+            
+            // 启动浏览器
+            await bot.browser.func.startBrowser();
+            
+            try {
+                // 登录
+                const loginResult = await bot.login.login();
+                if (!loginResult) {
+                    log('main', '失败任务管理', `重试搜索任务登录失败: ${task.accountEmail}`, 'warn');
+                    return false;
+                }
+                
+                // 执行搜索任务
+                let success = false;
+                if (activity.promotionType === 'urlreward' && activity.name && activity.name.toLowerCase().includes('exploreonbing')) {
+                    success = await bot.workers.executeSearchOnBingActivity(bot.browser.page!, activity);
+                } else {
+                    success = await bot.workers.executeUrlRewardActivity(bot.browser.page!, activity);
+                }
+                
+                if (success) {
+                    log('main', '失败任务管理', `重试搜索任务成功: ${task.accountEmail}`);
+                } else {
+                    log('main', '失败任务管理', `重试搜索任务失败: ${task.accountEmail}`, 'warn');
+                }
+                
+                return success;
+                
+            } finally {
+                // 关闭浏览器
+                await bot.browser.func.closeBrowser();
+            }
+        } else {
+            log('main', '失败任务管理', `重试搜索任务缺少任务数据: ${task.accountEmail}`, 'warn');
+            return false;
+        }
+        
+    } catch (error) {
+        log('main', '失败任务管理', `重试搜索任务异常: ${error}`, 'error');
+        return false;
+    }
+}
+
+/**
+ * 重试移动端任务
+ */
+async function retryMobileTask(task: any): Promise<boolean> {
+    try {
+        log('main', '失败任务管理', `重试移动端任务: ${task.reason}`);
+        
+        // 创建新的bot实例来执行重试
+        const bot = new MicrosoftRewardsBot();
+        bot.account = { email: task.accountEmail } as any;
+        
+        // 初始化失败任务管理器
+        bot.workers.initializeFailedTaskManager(bot.config.sessionPath);
+        
+        // 启动移动端浏览器
+        await bot.browser.func.startBrowser(true); // true表示移动端
+        
+        try {
+            // 登录
+            const loginResult = await bot.login.login();
+            if (!loginResult) {
+                log('main', '失败任务管理', `重试移动端任务登录失败: ${task.accountEmail}`, 'warn');
+                return false;
+            }
+            
+            // 执行移动端任务
+            const activities = new Activities(bot);
+            const success = await activities.runMobile();
+            
+            if (success) {
+                log('main', '失败任务管理', `重试移动端任务成功: ${task.accountEmail}`);
+            } else {
+                log('main', '失败任务管理', `重试移动端任务失败: ${task.accountEmail}`, 'warn');
+            }
+            
+            return success;
+            
+        } finally {
+            // 关闭浏览器
+            await bot.browser.func.closeBrowser();
+        }
+        
+    } catch (error) {
+        log('main', '失败任务管理', `重试移动端任务异常: ${error}`, 'error');
+        return false;
+    }
+}
+
+/**
+ * 重试桌面端任务
+ */
+async function retryDesktopTask(task: any): Promise<boolean> {
+    try {
+        log('main', '失败任务管理', `重试桌面端任务: ${task.reason}`);
+        
+        // 创建新的bot实例来执行重试
+        const bot = new MicrosoftRewardsBot();
+        bot.account = { email: task.accountEmail } as any;
+        
+        // 初始化失败任务管理器
+        bot.workers.initializeFailedTaskManager(bot.config.sessionPath);
+        
+        // 启动桌面端浏览器
+        await bot.browser.func.startBrowser(false); // false表示桌面端
+        
+        try {
+            // 登录
+            const loginResult = await bot.login.login();
+            if (!loginResult) {
+                log('main', '失败任务管理', `重试桌面端任务登录失败: ${task.accountEmail}`, 'warn');
+                return false;
+            }
+            
+            // 执行桌面端任务
+            const activities = new Activities(bot);
+            const success = await activities.runDesktop();
+            
+            if (success) {
+                log('main', '失败任务管理', `重试桌面端任务成功: ${task.accountEmail}`);
+            } else {
+                log('main', '失败任务管理', `重试桌面端任务失败: ${task.accountEmail}`, 'warn');
+            }
+            
+            return success;
+            
+        } finally {
+            // 关闭浏览器
+            await bot.browser.func.closeBrowser();
+        }
+        
+    } catch (error) {
+        log('main', '失败任务管理', `重试桌面端任务异常: ${error}`, 'error');
+        return false;
+    }
+}
 
 // 添加服务端状态跟踪
 let serverOffline = false;
@@ -154,8 +377,9 @@ class NodeWebSocketClient {
             this.isConnected = true;
             this.reconnectAttempts = 0;
             this.isReconnecting = false;
-            this.notifyNodeReady();
             this.processQueue(); // 处理队列中的消息
+            
+            // 节点准备就绪通知将在checkInNode成功后自动处理
         });
 
         this.socket.on('disconnect', () => {
@@ -201,6 +425,10 @@ class NodeWebSocketClient {
         this.socket.on('pong', (data: any) => {
             // 静默处理pong响应，减少日志输出
             // log('main', 'WebSocket', `🏓 收到pong响应: ${JSON.stringify(data)}`);
+        });
+
+        this.socket.on('warning', (data: any) => {
+            log('main', 'WebSocket', `⚠️ WebSocket警告: ${data.message || JSON.stringify(data)}`, 'warn');
         });
 
         this.socket.on('upgrade_command', (data: any) => {
@@ -437,6 +665,9 @@ async function executeTasks() {
         const config = loadConfig();
         const accounts = await loadAccounts();
         if (accounts.length > 0) {
+            // 初始化失败任务管理器
+            initializeFailedTaskManager(config.sessionPath);
+            
             await runHotSearchScript(accounts);
             
             // 严格按账户顺序执行：每个账户先完成桌面端，再完成移动端
@@ -512,11 +743,65 @@ async function executeTasks() {
                 }
                 
                 log('main', '主流程', `账户 ${account.email} 所有任务执行完成`);
+                
+                // 重试该账户的失败任务
+                try {
+                    const retryResult = await retryFailedTasks(account.email);
+                    if (retryResult.success > 0 || retryResult.failed > 0) {
+                        log('main', '主流程', `账户 ${account.email} 失败任务重试完成: 成功 ${retryResult.success} 个，失败 ${retryResult.failed} 个`);
+                    }
+                } catch (error) {
+                    log('main', '主流程', `账户 ${account.email} 失败任务重试异常: ${error}`, 'warn');
+                }
             }
             
             // 更新任务结果
             taskResult.account_count = taskResult.accounts.length;
             log('main', '主流程', '所有账户任务执行完成');
+            
+            // 执行全局失败任务重试
+            try {
+                if (failedTaskManager) {
+                    // 清理过期任务
+                    failedTaskManager.cleanupExpiredTasks();
+                    
+                    const globalRetryResult = await failedTaskManager.retryAllFailedTasks(async (task) => {
+                        try {
+                            log('main', '失败任务管理', `全局重试任务: ${task.taskType} - ${task.reason}`);
+                            
+                            // 根据任务类型执行重试
+                            switch (task.taskType) {
+                                case 'search':
+                                    return await retrySearchTask(task);
+                                case 'mobile':
+                                    return await retryMobileTask(task);
+                                case 'desktop':
+                                    return await retryDesktopTask(task);
+                                default:
+                                    log('main', '失败任务管理', `未知任务类型: ${task.taskType}`, 'warn');
+                                    return false;
+                            }
+                        } catch (error) {
+                            log('main', '失败任务管理', `全局重试任务异常: ${error}`, 'error');
+                            return false;
+                        }
+                    });
+                    
+                    if (globalRetryResult.success > 0 || globalRetryResult.failed > 0) {
+                        log('main', '主流程', `全局失败任务重试完成: 成功 ${globalRetryResult.success} 个，失败 ${globalRetryResult.failed} 个`);
+                    }
+                    
+                    // 输出失败任务统计
+                    const stats = failedTaskManager.getFailedTaskStats();
+                    if (stats.total > 0) {
+                        log('main', '失败任务管理', `当前失败任务统计: 总计 ${stats.total} 个`);
+                        log('main', '失败任务管理', `按账户分布: ${JSON.stringify(stats.byAccount)}`);
+                        log('main', '失败任务管理', `按类型分布: ${JSON.stringify(stats.byType)}`);
+                    }
+                }
+            } catch (error) {
+                log('main', '主流程', `全局失败任务重试异常: ${error}`, 'warn');
+            }
         } else {
             log('main', '主流程', '未获取到分配的账户，本轮任务结束。');
         }
@@ -1056,6 +1341,14 @@ async function checkInNode() {
             timeout: 30000 // 30秒超时
         });
         
+        // 节点注册成功后，立即加入WebSocket房间
+        if (wsClient && wsClient.connected) {
+            wsClient.safeEmit('join_node_room', {
+                node_name: apiConfig.nodeName
+            });
+            log('main', 'WebSocket', '📡 节点注册成功，已加入WebSocket房间');
+        }
+        
         // 检查服务端是否从离线状态恢复
         if (serverOffline) {
             const offlineDuration = Math.round((Date.now() - lastServerErrorTime) / 1000);
@@ -1388,6 +1681,9 @@ export class MicrosoftRewardsBot {
         this.browser = { func: new BrowserFunc(this), utils: new BrowserUtil(this) };
         this.config = loadConfig();
         this.login = new Login(this);
+        
+        // 初始化失败任务管理器
+        this.workers.initializeFailedTaskManager(this.config.sessionPath);
         this.loginExceptionHandlerManager = new LoginExceptionHandlerManager(this);
         this.pageExceptionDetector = new PageExceptionDetector(this);
         this.sendStatusUpdate = (type, status, code, message) => sendLoginStatusUpdate(this, type, status, code, message);

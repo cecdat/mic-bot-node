@@ -5,12 +5,42 @@ import path from 'path'
 import { DashboardData } from '../interface/DashboardData'
 import { UnifiedTask } from '../util/AIOrcestrator'
 import { MicrosoftRewardsBot } from '../index'
+import { FailedTaskManager } from '../util/FailedTaskManager'
 
 export class Workers {
     public bot: MicrosoftRewardsBot
+    private failedTaskManager: FailedTaskManager | null = null
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
+    }
+
+    /**
+     * 初始化失败任务管理器
+     */
+    initializeFailedTaskManager(sessionPath: string): void {
+        if (!this.failedTaskManager) {
+            this.failedTaskManager = new FailedTaskManager(sessionPath, 3);
+            this.bot.log(this.bot.isMobile, '失败任务管理', '失败任务管理器已初始化');
+        }
+    }
+
+    /**
+     * 添加失败任务
+     */
+    addFailedTask(accountEmail: string, taskType: 'search' | 'mobile' | 'desktop', reason: string, taskData?: any): void {
+        if (!this.failedTaskManager) {
+            this.bot.log(this.bot.isMobile, '失败任务管理', '失败任务管理器未初始化', 'warn');
+            return;
+        }
+
+        this.failedTaskManager.addFailedTask({
+            accountEmail,
+            taskType,
+            reason,
+            maxRetries: 3,
+            taskData
+        });
     }
 
     /**
@@ -983,6 +1013,15 @@ export class Workers {
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.bot.log(this.bot.isMobile, '必应搜索', `执行必应搜索时出错: ${errorMessage}`, 'error');
+            
+            // 记录失败任务
+            this.addFailedTask(
+                this.bot.account?.email || 'unknown',
+                'search',
+                `必应搜索失败: ${errorMessage}`,
+                { activity, query: await this.getSearchQuery(activity.title) }
+            );
+            
             return false;
         }
     }
@@ -1003,6 +1042,15 @@ export class Workers {
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.bot.log(this.bot.isMobile, 'URL奖励', `执行URL奖励时出错: ${errorMessage}`, 'error');
+            
+            // 记录失败任务
+            this.addFailedTask(
+                this.bot.account?.email || 'unknown',
+                'search',
+                `URL奖励失败: ${errorMessage}`,
+                { activity }
+            );
+            
             return false;
         }
     }
