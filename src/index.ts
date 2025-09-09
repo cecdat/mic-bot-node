@@ -591,6 +591,9 @@ async function executeUpgrade(upgradeData: any) {
         }
         
         // 2. 根据升级类型处理文件
+        let needRebuild = false;
+        let needRestart = true;
+        
         if (upgrade_type === 'zip') {
             // ZIP文件升级
             log('main', '升级', 'ZIP文件升级...');
@@ -603,9 +606,38 @@ async function executeUpgrade(upgradeData: any) {
                 const unzipResult = await execCommand('cd /tmp && unzip -o upgrade.zip');
                 log('main', '升级', `解压结果: ${unzipResult}`);
                 
-                // 复制文件到应用目录
-                const copyResult = await execCommand('cp -r /tmp/dist/* /app/dist/');
-                log('main', '升级', `复制文件结果: ${copyResult}`);
+                // 检查是否包含TypeScript源码
+                const hasTsFiles = await execCommand('find /tmp -name "*.ts" | head -1').then(() => true).catch(() => false);
+                const hasDistFiles = await execCommand('find /tmp -path "*/dist/*" -name "*.js" | head -1').then(() => true).catch(() => false);
+                
+                if (hasTsFiles) {
+                    // 包含TypeScript源码，需要重新构建
+                    log('main', '升级', '检测到TypeScript源码，需要重新构建...');
+                    needRebuild = true;
+                    
+                    // 复制源码到临时目录
+                    await execCommand('cp -r /tmp/src /tmp/build-src');
+                    await execCommand('cp /tmp/package*.json /tmp/build-src/');
+                    await execCommand('cp /tmp/tsconfig.json /tmp/build-src/');
+                    
+                    // 构建新代码
+                    const buildResult = await execCommand('cd /tmp/build-src && npm install && npm run build');
+                    log('main', '升级', `构建结果: ${buildResult}`);
+                    
+                    // 复制构建后的文件
+                    const copyResult = await execCommand('cp -r /tmp/build-src/dist/* /app/dist/');
+                    log('main', '升级', `复制文件结果: ${copyResult}`);
+                    
+                } else if (hasDistFiles) {
+                    // 包含编译后的文件，直接复制
+                    log('main', '升级', '检测到编译后文件，直接复制...');
+                    const copyResult = await execCommand('cp -r /tmp/dist/* /app/dist/');
+                    log('main', '升级', `复制文件结果: ${copyResult}`);
+                } else {
+                    // 其他文件，直接复制到dist目录
+                    const copyResult = await execCommand('cp -r /tmp/* /app/dist/');
+                    log('main', '升级', `复制文件结果: ${copyResult}`);
+                }
                 
             } catch (error) {
                 log('main', '升级', `ZIP升级失败: ${error}`, 'error');
@@ -619,9 +651,40 @@ async function executeUpgrade(upgradeData: any) {
                 const downloadResult = await execCommand(`wget -O /tmp/${file_name} "${file_url}"`);
                 log('main', '升级', `下载结果: ${downloadResult}`);
                 
-                // 复制文件到目标位置
-                const copyResult = await execCommand(`cp /tmp/${file_name} /app/dist/`);
-                log('main', '升级', `复制文件结果: ${copyResult}`);
+                // 检查文件类型
+                if (file_name.endsWith('.ts')) {
+                    // TypeScript文件，需要重新构建
+                    log('main', '升级', '检测到TypeScript文件，需要重新构建...');
+                    needRebuild = true;
+                    
+                    // 复制文件到临时构建目录
+                    await execCommand('mkdir -p /tmp/build-src');
+                    await execCommand(`cp /tmp/${file_name} /tmp/build-src/`);
+                    await execCommand('cp -r /app/dist/* /tmp/build-src/');
+                    await execCommand('cp /app/package*.json /tmp/build-src/');
+                    await execCommand('cp /app/tsconfig.json /tmp/build-src/');
+                    
+                    // 构建新代码
+                    const buildResult = await execCommand('cd /tmp/build-src && npm install && npm run build');
+                    log('main', '升级', `构建结果: ${buildResult}`);
+                    
+                    // 复制构建后的文件
+                    const copyResult = await execCommand('cp -r /tmp/build-src/dist/* /app/dist/');
+                    log('main', '升级', `复制文件结果: ${copyResult}`);
+                    
+                } else if (file_name.endsWith('.json')) {
+                    // 配置文件，直接复制
+                    log('main', '升级', '检测到配置文件，直接复制...');
+                    const copyResult = await execCommand(`cp /tmp/${file_name} /app/dist/`);
+                    log('main', '升级', `复制文件结果: ${copyResult}`);
+                    needRestart = false; // 配置文件通常不需要重启
+                    
+                } else {
+                    // JavaScript文件，直接复制
+                    log('main', '升级', '检测到JavaScript文件，直接复制...');
+                    const copyResult = await execCommand(`cp /tmp/${file_name} /app/dist/`);
+                    log('main', '升级', `复制文件结果: ${copyResult}`);
+                }
                 
             } catch (error) {
                 log('main', '升级', `文件升级失败: ${error}`, 'error');
@@ -641,6 +704,7 @@ async function executeUpgrade(upgradeData: any) {
                 // 构建新代码
                 const buildResult = await execCommand('cd /tmp/temp-repo && npm install && npm run build');
                 log('main', '升级', `构建结果: ${buildResult}`);
+                needRebuild = true;
                 
                 // 复制新文件
                 const copyResult = await execCommand('cp -r /tmp/temp-repo/dist/* /app/dist/');
@@ -657,12 +721,22 @@ async function executeUpgrade(upgradeData: any) {
         
         // 发送进度更新
         if (wsClient && wsClient.connected) {
+            let status = 'restoring';
+            let message = '恢复配置文件...';
+            let progress = 70;
+            
+            if (needRebuild) {
+                status = 'building';
+                message = '重新构建应用...';
+                progress = 60;
+            }
+            
             wsClient.safeEmit('upgrade_status', {
                 node_id: config.apiServer?.nodeName || 'unknown',
                 upgrade_id,
-                status: 'restoring',
-                progress: 70,
-                message: '恢复配置文件...'
+                status: status,
+                progress: progress,
+                message: message
             });
         }
         
@@ -713,11 +787,19 @@ async function executeUpgrade(upgradeData: any) {
         
         log('main', '升级', '升级执行完成');
         
-        // 5. 延迟退出，让新代码生效
-        log('main', '升级', '5秒后退出当前进程，让新代码生效...');
-        setTimeout(() => {
-            process.exit(0);
-        }, 5000);
+        // 5. 根据升级类型决定是否需要重启
+        if (needRestart) {
+            if (needRebuild) {
+                log('main', '升级', '已重新构建，5秒后退出当前进程，让新代码生效...');
+            } else {
+                log('main', '升级', '已替换文件，5秒后退出当前进程，让新代码生效...');
+            }
+            setTimeout(() => {
+                process.exit(0);
+            }, 5000);
+        } else {
+            log('main', '升级', '配置文件已更新，无需重启进程');
+        }
         
     } catch (error) {
         log('main', '升级', `升级执行失败: ${error}`, 'error');
