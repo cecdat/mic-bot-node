@@ -118,22 +118,20 @@ async function retrySearchTask(task: any): Promise<boolean> {
             const activity = task.taskData.activity;
             
             // 启动浏览器
-            await bot.browser.func.startBrowser();
+            const browser = await bot.browserFactory.launchBrowser(bot.account);
+            const context = await bot.browserFactory.createContext(browser, bot.account);
+            bot.homePage = await context.newPage();
             
             try {
                 // 登录
-                const loginResult = await bot.login.login();
-                if (!loginResult) {
-                    log('main', '失败任务管理', `重试搜索任务登录失败: ${task.accountEmail}`, 'warn');
-                    return false;
-                }
+                await bot.login.login(bot.homePage, bot.account.email, bot.account.password);
                 
                 // 执行搜索任务
                 let success = false;
                 if (activity.promotionType === 'urlreward' && activity.name && activity.name.toLowerCase().includes('exploreonbing')) {
-                    success = await bot.workers.executeSearchOnBingActivity(bot.browser.page!, activity);
+                    success = await bot.workers.executeSearchOnBingActivity(bot.homePage, activity);
                 } else {
-                    success = await bot.workers.executeUrlRewardActivity(bot.browser.page!, activity);
+                    success = await bot.workers.executeUrlRewardActivity(bot.homePage, activity);
                 }
                 
                 if (success) {
@@ -146,7 +144,9 @@ async function retrySearchTask(task: any): Promise<boolean> {
                 
             } finally {
                 // 关闭浏览器
-                await bot.browser.func.closeBrowser();
+                if (bot.homePage && bot.homePage.context()) {
+                    await bot.homePage.context().close();
+                }
             }
         } else {
             log('main', '失败任务管理', `重试搜索任务缺少任务数据: ${task.accountEmail}`, 'warn');
@@ -174,19 +174,22 @@ async function retryMobileTask(task: any): Promise<boolean> {
         bot.workers.initializeFailedTaskManager(bot.config.sessionPath);
         
         // 启动移动端浏览器
-        await bot.browser.func.startBrowser(true); // true表示移动端
+        // 启动移动端浏览器
+        bot.isMobile = true;
+        const browser = await bot.browserFactory.launchBrowser(bot.account);
+        const context = await bot.browserFactory.createContext(browser, bot.account);
+        bot.homePage = await context.newPage();
         
         try {
             // 登录
-            const loginResult = await bot.login.login();
-            if (!loginResult) {
-                log('main', '失败任务管理', `重试移动端任务登录失败: ${task.accountEmail}`, 'warn');
-                return false;
-            }
+            await bot.login.login(bot.homePage, bot.account.email, bot.account.password);
             
             // 执行移动端任务
             const activities = new Activities(bot);
-            const success = await activities.runMobile();
+            // 移动端任务执行逻辑
+            const dashboardData = await bot.browser.func.getDashboardData(bot.homePage);
+            await activities.doSearch(bot.homePage, dashboardData, bot.account.email);
+            const success = true;
             
             if (success) {
                 log('main', '失败任务管理', `重试移动端任务成功: ${task.accountEmail}`);
@@ -198,7 +201,9 @@ async function retryMobileTask(task: any): Promise<boolean> {
             
         } finally {
             // 关闭浏览器
-            await bot.browser.func.closeBrowser();
+            if (bot.homePage && bot.homePage.context()) {
+                await bot.homePage.context().close();
+            }
         }
         
     } catch (error) {
@@ -222,19 +227,22 @@ async function retryDesktopTask(task: any): Promise<boolean> {
         bot.workers.initializeFailedTaskManager(bot.config.sessionPath);
         
         // 启动桌面端浏览器
-        await bot.browser.func.startBrowser(false); // false表示桌面端
+        // 启动桌面端浏览器
+        bot.isMobile = false;
+        const browser = await bot.browserFactory.launchBrowser(bot.account);
+        const context = await bot.browserFactory.createContext(browser, bot.account);
+        bot.homePage = await context.newPage();
         
         try {
             // 登录
-            const loginResult = await bot.login.login();
-            if (!loginResult) {
-                log('main', '失败任务管理', `重试桌面端任务登录失败: ${task.accountEmail}`, 'warn');
-                return false;
-            }
+            await bot.login.login(bot.homePage, bot.account.email, bot.account.password);
             
             // 执行桌面端任务
             const activities = new Activities(bot);
-            const success = await activities.runDesktop();
+            // 桌面端任务执行逻辑
+            const dashboardData = await bot.browser.func.getDashboardData(bot.homePage);
+            await activities.doSearch(bot.homePage, dashboardData, bot.account.email);
+            const success = true;
             
             if (success) {
                 log('main', '失败任务管理', `重试桌面端任务成功: ${task.accountEmail}`);
@@ -246,7 +254,9 @@ async function retryDesktopTask(task: any): Promise<boolean> {
             
         } finally {
             // 关闭浏览器
-            await bot.browser.func.closeBrowser();
+            if (bot.homePage && bot.homePage.context()) {
+                await bot.homePage.context().close();
+            }
         }
         
     } catch (error) {
@@ -294,6 +304,11 @@ class NodeWebSocketClient {
     private heartbeatTimer: NodeJS.Timeout | null = null; // 心跳定时器
     private lastErrorTime: number = 0; // 上次错误时间
     private errorSuppressInterval: number = 30000; // 错误抑制间隔30秒
+    
+    // 房间状态跟踪
+    private isRoomJoined: boolean = false;
+    private lastRoomJoinTime: number = 0;
+    private roomJoinCooldown: number = 300000; // 5分钟冷却期
 
     constructor(config: any) {
         this.config = config;
@@ -385,6 +400,7 @@ class NodeWebSocketClient {
         this.socket.on('disconnect', () => {
             log('main', 'WebSocket', '❌ WebSocket连接断开');
             this.isConnected = false;
+            this.resetRoomStatus(); // 重置房间状态
             this.scheduleReconnect();
         });
 
@@ -508,6 +524,39 @@ class NodeWebSocketClient {
             clearInterval(this.heartbeatTimer);
             this.heartbeatTimer = null;
         }
+    }
+
+    /**
+     * 检查是否需要加入房间
+     */
+    shouldJoinRoom(): boolean {
+        const now = Date.now();
+        return !this.isRoomJoined || (now - this.lastRoomJoinTime) > this.roomJoinCooldown;
+    }
+
+    /**
+     * 加入节点房间
+     */
+    joinNodeRoom() {
+        if (!this.shouldJoinRoom()) {
+            // 静默跳过，减少日志噪音
+            return;
+        }
+        
+        this.safeEmit('join_node_room', {
+            node_name: this.config.apiServer.nodeName
+        });
+        this.isRoomJoined = true;
+        this.lastRoomJoinTime = Date.now();
+        log('main', 'WebSocket', '📡 节点注册成功，已加入WebSocket房间');
+    }
+
+    /**
+     * 重置房间状态（连接断开时）
+     */
+    resetRoomStatus() {
+        this.isRoomJoined = false;
+        this.lastRoomJoinTime = 0;
     }
 
     /**
@@ -656,7 +705,7 @@ async function executeTasks() {
         success: true,
         account_count: 0,
         total_points: 0,
-        accounts: [] as Array<{email: string, points_gained: number, final_points: number}>
+        accounts: [] as Array<{email: string, points_gained: number, final_points: number, desktop_gain: number, mobile_gain: number}>
     };
     
     try {
@@ -714,18 +763,53 @@ async function executeTasks() {
                 const finalDailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
                 if (finalDailyPointsData && finalDailyPointsData.date === todayStr) {
                     // 优先使用移动端完成后的最终积分，如果没有则使用桌面端完成后的积分
-                    const finalPoints = finalDailyPointsData.mobileFinalPoints || finalDailyPointsData.desktopFinalPoints || finalDailyPointsData.initialPoints || 0;
-                    const dailyGain = initialPointsToday > 0 ? finalPoints - initialPointsToday : 0;
+                    let finalPoints = finalDailyPointsData.mobileFinalPoints || finalDailyPointsData.desktopFinalPoints || finalDailyPointsData.initialPoints || 0;
+                    
+                    // 修复积分计算逻辑：即使初始积分为0，也要计算实际收益
+                    let dailyGain = 0;
+                    if (initialPointsToday > 0) {
+                        dailyGain = finalPoints - initialPointsToday;
+                    } else if (finalPoints > 0) {
+                        // 如果初始积分为0但最终积分大于0，说明有收益
+                        dailyGain = finalPoints;
+                    }
                     
                     log('main', '主流程', `[${account.email}] 积分统计 - 初始: ${initialPointsToday}, 最终: ${finalPoints}, 今日收益: ${dailyGain}`);
+                    
+                    // 验证积分数据合理性
+                    if (finalPoints < 0) {
+                        log('main', '主流程', `[${account.email}] ⚠️ 最终积分异常: ${finalPoints}，设置为0`, 'warn');
+                        finalPoints = 0;
+                    }
+                    
+                    if (dailyGain < 0) {
+                        log('main', '主流程', `[${account.email}] ⚠️ 今日收益异常: ${dailyGain}，设置为0`, 'warn');
+                        dailyGain = 0;
+                    }
+                    
+                    // 计算桌面端和移动端的实际收益
+                    let desktopGain = 0;
+                    let mobileGain = 0;
+                    
+                    if (finalDailyPointsData.desktopFinalPoints && finalDailyPointsData.initialPoints) {
+                        desktopGain = Math.max(0, finalDailyPointsData.desktopFinalPoints - finalDailyPointsData.initialPoints);
+                    }
+                    
+                    if (finalDailyPointsData.mobileFinalPoints && finalDailyPointsData.desktopFinalPoints) {
+                        mobileGain = Math.max(0, finalDailyPointsData.mobileFinalPoints - finalDailyPointsData.desktopFinalPoints);
+                    }
                     
                     // 记录账户执行结果
                     taskResult.accounts.push({
                         email: account.email,
                         points_gained: dailyGain,
-                        final_points: finalPoints
+                        final_points: finalPoints,
+                        desktop_gain: desktopGain,
+                        mobile_gain: mobileGain
                     });
                     taskResult.total_points += dailyGain;
+                    
+                    log('main', '主流程', `[${account.email}] 收益统计 - 桌面端: ${desktopGain}, 移动端: ${mobileGain}`);
                     
                     // 上报积分数据
                     const bot = new MicrosoftRewardsBot();
@@ -737,9 +821,11 @@ async function executeTasks() {
                         email: account.email,
                         total_points: finalPoints,
                         daily_gain: dailyGain,
-                        desktop_gain: 0, // 子进程执行，无法获取详细收益
-                        mobile_gain: 0   // 子进程执行，无法获取详细收益
+                        desktop_gain: desktopGain,
+                        mobile_gain: mobileGain
                     });
+                } else {
+                    log('main', '主流程', `[${account.email}] ⚠️ 未找到今日积分数据，跳过上报`, 'warn');
                 }
                 
                 log('main', '主流程', `账户 ${account.email} 所有任务执行完成`);
@@ -829,6 +915,7 @@ async function executeTasks() {
  */
 async function executeUpgrade(upgradeData: any) {
     const { upgrade_id, upgrade_type = 'files', file_url, file_name } = upgradeData;
+    const config = loadConfig();
     
     try {
         log('main', '升级', `开始执行升级: ${upgrade_type}`);
@@ -1151,7 +1238,7 @@ async function executeTaskIsolated(task: any) {
             success: true,
             account_count: 0,
             total_points: 0,
-            accounts: [] as Array<{email: string, points_gained: number, final_points: number}>
+            accounts: [] as Array<{email: string, points_gained: number, final_points: number, desktop_gain: number, mobile_gain: number}>
         };
         
         if (task.command === 'RUN_TASKS') {
@@ -1163,7 +1250,6 @@ async function executeTaskIsolated(task: any) {
         // 任务完成 - 尝试发送完成状态，但不依赖WebSocket连接
         if (wsClient && wsClient.connected) {
             wsClient.emitTaskStatusUpdate(task.task_id, 'completed', task.node_name, taskResult);
-            wsClient.emitTaskCompleted(task.task_id, task.node_name, taskResult);
         }
         // 静默处理WebSocket未连接的情况，减少日志输出
         
@@ -1341,12 +1427,9 @@ async function checkInNode() {
             timeout: 30000 // 30秒超时
         });
         
-        // 节点注册成功后，立即加入WebSocket房间
+        // 节点注册成功后，使用新的房间加入逻辑
         if (wsClient && wsClient.connected) {
-            wsClient.safeEmit('join_node_room', {
-                node_name: apiConfig.nodeName
-            });
-            log('main', 'WebSocket', '📡 节点注册成功，已加入WebSocket房间');
+            wsClient.joinNodeRoom();
         }
         
         // 检查服务端是否从离线状态恢复
@@ -1663,9 +1746,9 @@ export class MicrosoftRewardsBot {
     public checkStopStatus: () => boolean = () => shouldStopTask;
     public isMobile: boolean = false;
     public homePage!: Page;
-    private browserFactory: Browser = new Browser(this);
-    private workers: Workers;
-    private login: Login;
+    public browserFactory: Browser = new Browser(this);
+    public workers: Workers;
+    public login: Login;
     private loginExceptionHandlerManager: LoginExceptionHandlerManager;
     private pageExceptionDetector: PageExceptionDetector;
     public axios!: Axios;
@@ -1698,7 +1781,28 @@ export class MicrosoftRewardsBot {
             await this.login.login(page, account.email, account.password);
             
             // 登录成功后获取初始积分
-            const initialData = await this.browser.func.getDashboardData(page);
+            let initialData;
+            let retryCount = 0;
+            const maxRetries = 3;
+            
+            while (retryCount < maxRetries) {
+                try {
+                    initialData = await this.browser.func.getDashboardData(page);
+                    if (initialData && initialData.userStatus && initialData.userStatus.availablePoints !== undefined) {
+                        break;
+                    } else {
+                        throw new Error('仪表板数据不完整');
+                    }
+                } catch (error) {
+                    retryCount++;
+                    log(this.isMobile, '主流程', `[${account.email}] 获取初始积分失败 (${retryCount}/${maxRetries}): ${error}`, 'warn');
+                    if (retryCount >= maxRetries) {
+                        throw new Error(`获取初始积分失败，已重试${maxRetries}次`);
+                    }
+                    await page.waitForTimeout(2000); // 等待2秒后重试
+                }
+            }
+            
             const currentInitialPoints = initialData.userStatus.availablePoints;
             
             // 如果之前没有初始积分记录，则保存当前积分作为初始值
@@ -1733,7 +1837,30 @@ export class MicrosoftRewardsBot {
             if (this.config.workers.doPunchCards) await this.workers.doPunchCard(page, initialData);
             const afterActivitiesData = await this.browser.func.getDashboardData(page);
             if (this.config.workers.doDesktopSearch) await this.activities.doSearch(page, afterActivitiesData, account.email);
-            const finalData = await this.browser.func.getDashboardData(page);
+            
+            // 获取最终积分，添加重试机制
+            let finalData;
+            let finalRetryCount = 0;
+            const maxFinalRetries = 3;
+            
+            while (finalRetryCount < maxFinalRetries) {
+                try {
+                    finalData = await this.browser.func.getDashboardData(page);
+                    if (finalData && finalData.userStatus && finalData.userStatus.availablePoints !== undefined) {
+                        break;
+                    } else {
+                        throw new Error('最终仪表板数据不完整');
+                    }
+                } catch (error) {
+                    finalRetryCount++;
+                    log(this.isMobile, '主流程', `[${account.email}] 获取最终积分失败 (${finalRetryCount}/${maxFinalRetries}): ${error}`, 'warn');
+                    if (finalRetryCount >= maxFinalRetries) {
+                        throw new Error(`获取最终积分失败，已重试${maxFinalRetries}次`);
+                    }
+                    await page.waitForTimeout(2000);
+                }
+            }
+            
             const finalPoints = finalData.userStatus.availablePoints;
             
             // 计算桌面端收益：基于今日初始积分
@@ -1925,7 +2052,29 @@ export class MicrosoftRewardsBot {
                 }
             }
             
-            const finalData = await this.browser.func.getDashboardData(page);
+            // 获取移动端最终积分，添加重试机制
+            let finalData;
+            let mobileFinalRetryCount = 0;
+            const maxMobileFinalRetries = 3;
+            
+            while (mobileFinalRetryCount < maxMobileFinalRetries) {
+                try {
+                    finalData = await this.browser.func.getDashboardData(page);
+                    if (finalData && finalData.userStatus && finalData.userStatus.availablePoints !== undefined) {
+                        break;
+                    } else {
+                        throw new Error('移动端最终仪表板数据不完整');
+                    }
+                } catch (error) {
+                    mobileFinalRetryCount++;
+                    log(this.isMobile, '主流程', `[${account.email}] 获取移动端最终积分失败 (${mobileFinalRetryCount}/${maxMobileFinalRetries}): ${error}`, 'warn');
+                    if (mobileFinalRetryCount >= maxMobileFinalRetries) {
+                        throw new Error(`获取移动端最终积分失败，已重试${maxMobileFinalRetries}次`);
+                    }
+                    await page.waitForTimeout(2000);
+                }
+            }
+            
             const finalPoints = finalData.userStatus.availablePoints;
             
             // 计算移动端收益：基于桌面端完成后的积分
@@ -2035,8 +2184,14 @@ export class MicrosoftRewardsBot {
             // 获取最终积分：使用移动端完成后的积分作为最终积分
             const finalPoints = mobileResult.points;
 
-            // 计算今日总收益：使用今日初始积分作为基准
-            const dailyGain = initialPointsToday > 0 ? finalPoints - initialPointsToday : 0;
+            // 修复积分计算逻辑：即使初始积分为0，也要计算实际收益
+            let dailyGain = 0;
+            if (initialPointsToday > 0) {
+                dailyGain = finalPoints - initialPointsToday;
+            } else if (finalPoints > 0) {
+                // 如果初始积分为0但最终积分大于0，说明有收益
+                dailyGain = finalPoints;
+            }
             
             // 计算桌面端和移动端的实际收益
             const actualDesktopGain = desktopResult.gain;
@@ -2501,8 +2656,15 @@ async function main() {
                     
                     log('main', '主流程', `📋 收到WebSocket任务: ${task.task_id} (${task.command})`);
                     
-                    // 使用隔离执行函数，确保任务执行不受WebSocket连接状态影响
-                    executeTaskIsolated(task);
+                    // 检查是否与当前正在执行的任务冲突
+                    if (isTaskRunning) {
+                        log('main', '主流程', `⚠️ 有任务正在执行中，将WebSocket任务加入队列: ${task.task_id}`, 'warn');
+                        // 将任务加入队列，等待当前任务完成
+                        taskExecutionQueue.push(task);
+                    } else {
+                        // 使用隔离执行函数，确保任务执行不受WebSocket连接状态影响
+                        executeTaskIsolated(task);
+                    }
                 }
                 
                 // 如果使用WebSocket调度，跳过轮询
@@ -2616,7 +2778,8 @@ async function main() {
                     
                     // 执行升级
                     try {
-                        await executeUpgrade(taskData.command_data);
+                        const upgradeData = response.data.data;
+                        await executeUpgrade(upgradeData);
                         log('main', '主流程', '升级执行完成', 'warn');
                     } catch (error) {
                         log('main', '主流程', `升级执行失败: ${error}`, 'error');

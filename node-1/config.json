@@ -1,0 +1,62 @@
+{
+    "baseURL": "https://rewards.bing.com",
+    "sessionPath": "sessions",
+    "headless": true,
+    "parallel": false,
+    "runOnZeroPoints": false,
+    "debug": false,
+    "snapshots": {
+        "login": false,
+        "taskExecution": false,
+        "cookies": false
+    },
+    "debugOptions": {
+        "saveTaskDebugInfo": false,
+        "saveTaskScreenshots": false,
+        "saveTaskHtml": false,
+        "logTaskDetails": false
+    },
+    "saveFingerprint": {
+        "mobile": false,
+        "desktop": false
+    },
+    "recording": {
+        "enableVideo": false,
+        "enableHar": false,
+        "videoDir": "sessions/task_videos",
+        "videoSize": {
+            "width": 1280,
+            "height": 720
+        }
+    },
+    "workers": {
+        "doDailySet": true,
+        "doMorePromotions": true,
+        "doPunchCards": true,
+        "doDesktopSearch": true,
+        "doMobileSearch": true,
+        "doDailyCheckIn": true,
+        "doReadToEarn": true
+    },
+    "searchOnBingLocalQueries": true,
+    "globalTimeout": "30s",
+    "navigationTimeout": "120s",
+    "apiServer": {
+        "enabled": true,
+        "updateUrl": "https://bot.2020310.xyz/",
+        "token": "RY7Ra5xw8_iAb3wi6lovujgV_eQZTV1ITZJ9vLtp-UI",
+        "nodeName": "HNSB-node1",
+        "heartbeatInterval": "45s",
+        "heartbeatTimeout": "10m"
+    },
+    "hotSearchApi": {
+        "enabled": true,
+        "baseUrl": "https://hots.237890.xyz"
+    },
+    "logPush": {
+        "enabled": false,
+        "serverUrl": "https://bot.2020310.xyz/web_api/logs/receive",
+        "token": "RY7Ra5xw8_iAb3wi6lovujgV_eQZTV1ITZJ9vLtp-UI",
+        "interval": 30
+    }
+}

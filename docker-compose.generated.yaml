@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  node-1:
+    image: local/bot-node-base:latest
+    container_name: node-1
+    restart: unless-stopped
+    volumes:
+      - ./node-1/config.json:/app/dist/config.json:ro
+      - ./node-1/sessions:/app/sessions
+    environment:
+      TZ: "Asia/Shanghai"
+      NODE_ENV: "production"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    mem_limit: 2g
+    cpus: 2
+    security_opt:
+      - no-new-privileges:true
+
+  node-2:
+    image: local/bot-node-base:latest
+    container_name: node-2
+    restart: unless-stopped
+    volumes:
+      - ./node-2/config.json:/app/dist/config.json:ro
+      - ./node-2/sessions:/app/sessions
+    environment:
+      TZ: "Asia/Shanghai"
+      NODE_ENV: "production"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    mem_limit: 2g
+    cpus: 2
+    security_opt:
+      - no-new-privileges:true
+
+  node-3:
+    image: local/bot-node-base:latest
+    container_name: node-3
+    restart: unless-stopped
+    volumes:
+      - ./node-3/config.json:/app/dist/config.json:ro
+      - ./node-3/sessions:/app/sessions
+    environment:
+      TZ: "Asia/Shanghai"
+      NODE_ENV: "production"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    mem_limit: 2g
+    cpus: 2
+    security_opt:
+      - no-new-privileges:true
+
+  node-4:
+    image: local/bot-node-base:latest
+    container_name: node-4
+    restart: unless-stopped
+    volumes:
+      - ./node-4/config.json:/app/dist/config.json:ro
+      - ./node-4/sessions:/app/sessions
+    environment:
+      TZ: "Asia/Shanghai"
+      NODE_ENV: "production"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    mem_limit: 2g
+    cpus: 2
+    security_opt:
+      - no-new-privileges:true
+

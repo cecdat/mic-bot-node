@@ -1,23 +1,23 @@
+version: '3.8'
+
 services:
   mic-bot-dev:
-    build: .
-    container_name: mic-bot-dev
+    image: mic-bot-node
+    container_name: mic-bot-hnsb
     restart: unless-stopped
+
     volumes:
-      # Mount only the config file and the sessions directory
       - ./src/config.json:/app/dist/config.json:ro
       - ./sessions:/app/sessions
 
     environment:
-      # Only timezone and Node environment are needed now
       TZ: "Asia/Shanghai"
       NODE_ENV: "production"
 
-    # 配置DNS
     dns:
       - 8.8.8.8
       - 1.1.1.1
-    # Resource limits and security options remain good practice
+
     mem_limit: 2g
     cpus: 2
     security_opt:

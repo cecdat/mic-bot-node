@@ -48,12 +48,41 @@ export default class BrowserFunc {
             this.bot.log(this.bot.isMobile, '仪表板数据', '正在获取最新的仪表板数据...');
             await this.gotoWithRetry(page, this.bot.config.baseURL);
 
+            // 等待页面加载完成
+            await page.waitForLoadState('networkidle', { timeout: 10000 });
+
             const scriptContent = await page.evaluate(() => {
                 const scripts = Array.from(document.querySelectorAll('script'));
                 const targetScript = scripts.find(script => script.innerText.includes('var dashboard'));
                 return targetScript?.innerText || null;
             });
-            if (!scriptContent) throw new Error('在脚本中未找到仪表板数据');
+            
+            if (!scriptContent) {
+                // 尝试等待更长时间再重试
+                this.bot.log(this.bot.isMobile, '仪表板数据', '未找到仪表板脚本，等待3秒后重试...', 'warn');
+                await page.waitForTimeout(3000);
+                
+                const retryScriptContent = await page.evaluate(() => {
+                    const scripts = Array.from(document.querySelectorAll('script'));
+                    const targetScript = scripts.find(script => script.innerText.includes('var dashboard'));
+                    return targetScript?.innerText || null;
+                });
+                
+                if (!retryScriptContent) {
+                    throw new Error('在脚本中未找到仪表板数据，页面可能未完全加载');
+                }
+                
+                const dashboardData = await page.evaluate(scriptContent => {
+                    const regex = /var dashboard = (\{.*?\});/s;
+                    const match = regex.exec(scriptContent);
+                    return match?.[1] ? JSON.parse(match[1]) : null;
+                }, retryScriptContent);
+                
+                if (!dashboardData) throw new Error('无法解析仪表板脚本');
+                
+                this.bot.log(this.bot.isMobile, '仪表板数据', '重试成功获取仪表板数据。');
+                return dashboardData;
+            }
 
             const dashboardData = await page.evaluate(scriptContent => {
                 const regex = /var dashboard = (\{.*?\});/s;
@@ -63,14 +92,19 @@ export default class BrowserFunc {
 
             if (!dashboardData) throw new Error('无法解析仪表板脚本');
             
-            this.bot.log(this.bot.isMobile, '仪表板数据', '成功获取仪表板数据。');
+            // 验证关键数据是否存在
+            if (!dashboardData.userStatus || !dashboardData.userStatus.availablePoints) {
+                this.bot.log(this.bot.isMobile, '仪表板数据', '仪表板数据不完整，缺少用户状态信息', 'warn');
+                throw new Error('仪表板数据不完整，缺少用户状态信息');
+            }
+            
+            this.bot.log(this.bot.isMobile, '仪表板数据', `成功获取仪表板数据，当前积分: ${dashboardData.userStatus.availablePoints}`);
             return dashboardData;
         } catch (error) {
-    // 关键改动：先记录日志，再抛出标准的 Error 对象
-    const errorMessage = `获取仪表板数据时出错: ${error}`;
-    this.bot.log(this.bot.isMobile, '获取仪表板数据', errorMessage, 'error');
-    throw new Error(errorMessage);
-}
+            const errorMessage = `获取仪表板数据时出错: ${error}`;
+            this.bot.log(this.bot.isMobile, '获取仪表板数据', errorMessage, 'error');
+            throw new Error(errorMessage);
+        }
     }
 
     getBrowserEarnablePoints(data: DashboardData): EarnablePoints {

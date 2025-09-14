@@ -983,7 +983,7 @@ export class Workers {
     /**
      * 执行必应搜索活动
      */
-    private async executeSearchOnBingActivity(page: Page, activity: any): Promise<boolean> {
+    public async executeSearchOnBingActivity(page: Page, activity: any): Promise<boolean> {
         try {
             this.bot.log(this.bot.isMobile, '必应搜索', `执行必应搜索活动: ${activity.title}`);
             
@@ -1029,7 +1029,7 @@ export class Workers {
     /**
      * 执行URL奖励活动
      */
-    private async executeUrlRewardActivity(page: Page, activity: any): Promise<boolean> {
+    public async executeUrlRewardActivity(page: Page, activity: any): Promise<boolean> {
         try {
             this.bot.log(this.bot.isMobile, 'URL奖励', `执行URL奖励活动: ${activity.title}`);
             

@@ -43,9 +43,9 @@
     "navigationTimeout": "120s",
     "apiServer": {
         "enabled": true,
-        "updateUrl": "https://bot.237890.xyz/",
-        "token":"3c0e678d1567ad691b152d2ccfd7e92490dcd331662c00f8",
-        "nodeName": "SB-Codeing",
+        "updateUrl": "https://bot.2020310.xyz/",
+        "token": "hdJD4FMRw9wZMJYS-1dbBGXkIdZDV9Dlj_tmyI9EZI0",
+        "nodeName": "HNSB-node2",
         "heartbeatInterval": "45s",
         "heartbeatTimeout": "10m"
     },
@@ -55,8 +55,8 @@
     },
     "logPush": {
         "enabled": false,
-        "serverUrl": "https://bot.237890.xyz/web_api/logs/receive",
-        "token": "3c0e678d1567ad691b152d2ccfd7e92490dcd331662c00f8",
+        "serverUrl": "https://bot.2020310.xyz/web_api/logs/receive",
+        "token": "hdJD4FMRw9wZMJYS-1dbBGXkIdZDV9Dlj_tmyI9EZI0",
         "interval": 30
     }
 }
