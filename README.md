@@ -1,134 +1,175 @@
-# Mic-Bot - 分布式执行节点
+# mic-bot-node
 
-这是一个基于 TypeScript 和 Playwright 的 Microsoft Rewards 自动化脚本。在当前架构下，它被设计为一个**纯粹的、7x24小时在线的"工作节点"**，其所有的配置、任务调度和推送逻辑，都由中央的 **`mic-bot-service` (指挥中心)** 统一管理。
+Microsoft Rewards Bot Node - 微软奖励机器人节点
 
-**重要提示**: 本项目无法独立运行。它必须连接到一个已部署并正确配置的 `mic-bot-service` 实例才能工作。
+## 项目结构
 
-## ⚙️ 核心工作模式：守护进程与长轮询
-
-与旧版本不同，`mic-bot` 不再依赖 Cron 进行定时任务。它现在是一个**常驻服务（守护进程）**，其核心工作流程如下：
-
-1.  **启动与签到**: 容器启动后，`mic-bot` 会立即向指挥中心进行"签到"，报告自己已上线，并进入待机状态。
-2.  **心跳维持**: 程序会按照您在 `config.json` 中配置的 `heartbeatInterval` 间隔，定期向服务器发送心跳，以维持其"在线"状态。
-3.  **长轮询指令**: 在待机期间，`mic-bot` 会持续地向指挥中心的一个长轮询接口发送请求，并最长等待约一分钟，以"监听"来自服务器的指令。
-4.  **接收并执行任务**:
-    * 当您在指挥中心的网页上手动触发"运行"按钮时，服务器会通过长轮询立即向对应的节点下发 `RUN_TASKS` 指令。
-    * `mic-bot` 收到指令后，会立即向服务器报告自己的状态为"运行中"。
-    * 接着，它会从服务器获取分配给自己的账户列表，并开始执行所有自动化任务。
-5.  **完成并返回待机**: 所有账户的任务都执行完毕后，`mic-bot` 会向服务器报告自己的状态已变回"待机"，然后立即进入下一次的长轮询，等待新的指令。
-
-## 📊 日志管理功能
-
-### 日志推送
-- **主动推送**: 节点会定期将日志推送到指挥中心，实现集中化日志管理
-- **可配置间隔**: 支持自定义日志推送间隔（默认30秒）
-- **安全认证**: 使用API Token进行日志推送认证
-- **实时监控**: 指挥中心可以实时查看所有节点的运行日志
-
-### 日志级别
-- **LOG**: 普通信息日志
-- **WARN**: 警告信息
-- **ERROR**: 错误信息
-
-## 🚀 部署与配置
-
-部署 `mic-bot` 节点非常简单：
-
-### 1. 准备环境
-* 一台可以访问外网的设备（本地PC、服务器、NAS等）。
-* 已安装 [Docker](https://get.docker.com/) 和 [Docker Compose](https://docs.docker.com/compose/install/)。
-
-### 2. 获取并配置项目
-* 将本项目的全部文件下载或克隆到您的设备上。
-* **获取API Token**:
-    1.  登录到您的 `mic-bot-service` 指挥中心网页。
-    2.  导航到"**节点管理**"页面。
-    3.  点击"**新增节点**"，输入一个唯一的节点名称（例如 `MyHomePC`），然后点击创建。
-    4.  在弹出的窗口中，**复制生成的唯一 API Token**。
-* **编辑配置文件**:
-    1.  打开项目中的 `src/config.json` 文件。
-    2.  找到 `apiServer` 部分。
-    3.  将 `updateUrl` 修改为您指挥中心的地址（例如 `http://123.45.67.89:2002`）。
-    4.  将 `nodeName` 修改为您刚刚在网页上创建的、完全相同的节点名称。
-    5.  将 `token` 字段的值替换为您刚刚复制的**唯一 API Token**。
-    6.  **日志推送配置**（可选）:
-        - `logPush.enabled`: 设置为 `true` 启用日志推送
-        - `logPush.interval`: 设置日志推送间隔（秒）
-
-### 3. 构建并启动服务
-* 在 `mic-bot` 项目的根目录下，执行以下命令：
-    ```bash
-    docker-compose up -d --build
-    ```
-
-### 4. 验证
-* 查看 `mic-bot` 的日志 (`docker logs -f mic-bot-node`)，您应该能看到它成功启动并开始请求指令。
-* 回到 `mic-bot-service` 的"节点管理"页面，您应该能看到该节点的状态变为"在线"和"待机"。
-* 如果启用了日志推送，可以在节点管理页面点击"查看日志"按钮查看实时日志。
-
-## 🔧 配置说明
-
-### 主要配置项
-```json
-{
-  "apiServer": {
-    "enabled": true,
-    "updateUrl": "http://your-server:2002/",
-    "token": "your-api-token",
-    "nodeName": "your-node-name",
-    "heartbeatInterval": "45s",
-    "heartbeatTimeout": "10m"
-  },
-  "logPush": {
-    "enabled": true,
-    "serverUrl": "http://your-server:2002/web_api/logs/receive",
-    "token": "your-api-token",
-    "interval": 30
-  }
-}
+```
+mic-bot-node/
+├── app/                          # 业务代码目录
+│   ├── src/                      # 源代码
+│   ├── package.json              # 应用依赖
+│   ├── tsconfig.json             # TypeScript 配置
+│   └── requirements.txt          # Python 依赖
+├── node/                         # 节点目录
+│   ├── node-1/                   # 节点1
+│   │   ├── config.json           # 节点1配置
+│   │   └── sessions/             # 节点1会话数据
+│   ├── node-2/                   # 节点2
+│   │   ├── config.json           # 节点2配置
+│   │   └── sessions/             # 节点2会话数据
+│   └── ...
+├── deployments/                  # 部署相关文件
+│   ├── docker/                   # Docker 相关
+│   │   ├── Dockerfile
+│   │   └── .dockerignore
+│   ├── compose/                  # Docker Compose 文件
+│   └── scripts/                  # 部署脚本
+├── docs/                         # 文档目录
+├── scripts/                      # 工具脚本
+└── start.*                       # 项目启动脚本
 ```
 
-### 高级配置
-- **并发控制**: 支持通过 `clusters` 参数控制并发数量
-- **搜索延迟**: 支持配置搜索间隔的随机延迟
-- **调试选项**: 支持任务执行前后的快照和调试信息保存
-- **DNS配置**: 容器内配置了Google DNS (8.8.8.8) 和Cloudflare DNS (1.1.1.1)
+## 快速开始
 
-## 🛠️ 技术架构
+### 1. 部署节点
 
-### 核心技术栈
-- **TypeScript**: 提供类型安全和更好的开发体验
-- **Playwright**: 现代化的浏览器自动化框架
-- **Node.js**: 运行时环境
-- **Docker**: 容器化部署
-- **Axios**: HTTP客户端，用于与指挥中心通信
-
-### 主要模块
-- **Browser**: 浏览器管理和上下文创建
-- **Login**: 登录逻辑处理
-- **Workers**: 任务执行引擎
-- **Activities**: 各种活动任务实现
-- **LogPusher**: 日志推送模块
-- **AIOrchestrator**: 智能任务编排
-
-## 📝 日志查看
-
-### 本地日志
 ```bash
-# 查看容器日志
-docker logs -f mic-bot-node
+# Linux/macOS
+./start.sh deploy
 
-# 查看最近的日志
-docker logs --tail=100 mic-bot-node
+# Windows
+start.bat deploy
+
+# PowerShell
+.\start.ps1 deploy
 ```
 
-### 远程日志
-- 在指挥中心网页的节点管理页面点击"查看日志"
-- 支持按日志级别和标题过滤
-- 支持实时刷新和历史查询
+### 2. 配置节点
 
-## ⚠️ 免责声明
-使用此脚本可能会导致您的微软账户被封禁或暂停，请您自行承担风险！
+编辑配置文件：
+- `node/node-1/config.json`
+- `node/node-2/config.json`
+- ...
 
-## 📄 许可证
-本项目采用 [MIT](https://opensource.org/licenses/MIT) 许可证。
+主要配置项：
+- `apiServer.token`: API 认证令牌
+- `apiServer.updateUrl`: 服务器地址
+- `apiServer.nodeName`: 节点名称
+
+### 3. 启动服务
+
+```bash
+# 启动所有节点
+./start.sh start
+
+# 查看日志
+./start.sh logs
+
+# 停止服务
+./start.sh stop
+```
+
+## 目录说明
+
+### app/ - 业务代码
+包含所有业务逻辑代码，升级时只需替换此目录。
+
+### node/ - 节点目录
+每个节点包含配置文件和会话数据：
+- `config.json`: 节点配置文件
+  - API 服务器配置
+  - 浏览器配置
+  - 任务配置
+  - 日志配置
+- `sessions/`: 会话数据目录
+  - 登录状态
+  - Cookie 信息
+  - 任务快照
+  - 积分数据
+
+### deployments/ - 部署文件
+- `docker/`: Docker 构建文件
+- `compose/`: Docker Compose 配置
+- `scripts/`: 部署和管理脚本
+
+## 升级指南
+
+### 业务代码升级
+1. 备份当前 `app/` 目录
+2. 替换新的 `app/` 目录
+3. 重启服务：`./start.sh restart`
+
+### 配置升级
+1. 备份 `node/` 目录
+2. 更新配置文件
+3. 重启服务：`./start.sh restart`
+
+### 数据迁移
+1. 备份 `node/` 目录
+2. 停止服务：`./start.sh stop`
+3. 替换数据文件
+4. 启动服务：`./start.sh start`
+
+## 常用命令
+
+```bash
+# 完整部署
+./start.sh deploy
+
+# 构建镜像
+./start.sh build
+
+# 启动服务
+./start.sh start
+
+# 停止服务
+./start.sh stop
+
+# 重启服务
+./start.sh restart
+
+# 查看日志
+./start.sh logs
+
+# 清理资源
+./start.sh clean
+
+# 查看状态
+./start.sh status
+```
+
+## 故障排除
+
+### 1. 节点无法连接服务器
+- 检查 `configs/node-*/config.json` 中的 `updateUrl` 和 `token`
+- 确认服务器地址正确且可访问
+
+### 2. 任务执行失败
+- 检查浏览器配置
+- 查看日志：`./start.sh logs`
+- 检查网络连接
+
+### 3. 镜像构建失败
+- 检查 Docker 是否运行
+- 检查网络连接
+- 查看构建日志
+
+## 开发指南
+
+### 本地开发
+1. 进入 `app/` 目录
+2. 安装依赖：`npm install`
+3. 编译代码：`npm run build`
+4. 运行测试：`npm test`
+
+### 代码结构
+- `src/index.ts`: 主入口文件
+- `src/browser/`: 浏览器相关
+- `src/functions/`: 任务功能
+- `src/util/`: 工具函数
+- `src/interface/`: 类型定义
+
+## 许可证
+
+本项目仅供学习和研究使用，请遵守相关法律法规。

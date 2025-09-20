@@ -1,0 +1,54 @@
+version: '3.8' 
+ 
+services: 
+  node-1: 
+    image: local/bot-node-base:latest 
+    container_name: mic-bot-node-1 
+    restart: unless-stopped 
+    volumes: 
+      - D:\github\mic-bot-node\node\node-1\config.json:/app/config.json:ro 
+      - D:\github\mic-bot-node\node\node-1\sessions:/app/sessions 
+    environment: 
+      - NODE_ENV=production 
+    networks: 
+      - bot-network 
+ 
+  node-2: 
+    image: local/bot-node-base:latest 
+    container_name: mic-bot-node-2 
+    restart: unless-stopped 
+    volumes: 
+      - D:\github\mic-bot-node\node\node-2\config.json:/app/config.json:ro 
+      - D:\github\mic-bot-node\node\node-2\sessions:/app/sessions 
+    environment: 
+      - NODE_ENV=production 
+    networks: 
+      - bot-network 
+ 
+  node-3: 
+    image: local/bot-node-base:latest 
+    container_name: mic-bot-node-3 
+    restart: unless-stopped 
+    volumes: 
+      - D:\github\mic-bot-node\node\node-3\config.json:/app/config.json:ro 
+      - D:\github\mic-bot-node\node\node-3\sessions:/app/sessions 
+    environment: 
+      - NODE_ENV=production 
+    networks: 
+      - bot-network 
+ 
+  node-4: 
+    image: local/bot-node-base:latest 
+    container_name: mic-bot-node-4 
+    restart: unless-stopped 
+    volumes: 
+      - D:\github\mic-bot-node\node\node-4\config.json:/app/config.json:ro 
+      - D:\github\mic-bot-node\node\node-4\sessions:/app/sessions 
+    environment: 
+      - NODE_ENV=production 
+    networks: 
+      - bot-network 
+ 
+networks: 
+  bot-network: 
+    driver: bridge 
