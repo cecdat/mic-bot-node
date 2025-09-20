@@ -2768,6 +2768,21 @@ async function main() {
                     // 向服务端确认命令已执行
                     await confirmCommandToServer('UPGRADE');
                     log('main', '主流程', '升级命令处理完成', 'warn');
+                } else if (command === 'RESTART_SERVICE') {
+                    log('main', '主流程', '收到 [重启服务] 指令，准备重启...', 'warn');
+                    // 立即更新活动状态为Idle，停止当前任务
+                    shouldStopTask = true;
+                    await updateActivityStatus('Idle');
+                    isTaskRunning = false;
+                    
+                    // 向服务端确认命令已执行
+                    await confirmCommandToServer('RESTART_SERVICE');
+                    
+                    log('main', '主流程', '服务将在3秒后重启...', 'warn');
+                    setTimeout(() => {
+                        log('main', '主流程', '正在重启服务...', 'warn');
+                        process.exit(0); // 退出进程，让容器重启
+                    }, 3000);
                 } else if (command === null) {
                     // 移除空命令的日志输出，减少非关键信息
                     // 不将空命令视为停止指令
