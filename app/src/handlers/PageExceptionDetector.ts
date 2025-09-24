@@ -30,8 +30,18 @@ export class PageExceptionDetector {
             await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
             
             // 1. 检测身份验证页面（即将完成）- 优先级最高，避免误识别
+            // 注意：即将完成页面的处理已移至 VerificationCodeHandler，这里只做检测
             const verificationResult = await this.detectVerificationPage(page, email);
             if (verificationResult.detected) {
+                // 对于即将完成页面，只返回检测结果，不执行处理
+                if (verificationResult.pageType === 'almost_done') {
+                    return {
+                        detected: true,
+                        pageType: 'email_verification',
+                        action: 'almost_done_detected',
+                        message: '检测到即将完成页面，将由VerificationCodeHandler处理'
+                    };
+                }
                 return verificationResult;
             }
 
@@ -303,6 +313,14 @@ export class PageExceptionDetector {
      */
     private async detectEmailVerificationPage(page: Page, email: string): Promise<PageExceptionResult> {
         try {
+            // 首先检查是否是"即将完成"页面，如果是则跳过邮箱验证页面检测
+            const pageTitle = await page.title();
+            this.bot.log(this.bot.isMobile, '页面检测', `[${email}] detectEmailVerificationPage - 页面标题: ${pageTitle}`);
+            if (pageTitle.includes('即将完成') || pageTitle.includes('Almost done')) {
+                this.bot.log(this.bot.isMobile, '页面检测', `[${email}] detectEmailVerificationPage - 检测到"即将完成"页面，跳过邮箱验证页面检测`);
+                return { detected: false, pageType: 'email_verification' };
+            }
+
             const emailTexts = [
                 '验证你的身份',
                 'Verify your identity',
@@ -316,7 +334,6 @@ export class PageExceptionDetector {
             let detectedText = '';
 
             // 检查页面标题和内容
-            const pageTitle = await page.title();
             const pageText = await page.textContent('body');
 
             // 检查页面标题
@@ -720,15 +737,19 @@ export class PageExceptionDetector {
             let title1Found = false;
             let subtitle1Found = false;
             
+            // 首先检查页面标题
+            const pageTitle = await page.title();
+            this.bot.log(this.bot.isMobile, '页面检测', `[${email}] detectVerificationPage - 页面标题: ${pageTitle}`);
             for (const text of titleTexts1) {
-                const element = await page.locator(`text*="${text}"`).first();
-                if (await element.isVisible({ timeout: 2000 }).catch(() => false)) {
+                if (pageTitle.includes(text)) {
                     title1Found = true;
                     foundTitle = text;
+                    this.bot.log(this.bot.isMobile, '页面检测', `[${email}] detectVerificationPage - 找到匹配的标题: ${text}`);
                     break;
                 }
             }
             
+            // 如果标题匹配，再检查副标题
             if (title1Found) {
                 for (const text of subtitleTexts1) {
                     const element = await page.locator(`text*="${text}"`).first();
@@ -738,7 +759,8 @@ export class PageExceptionDetector {
                     }
                 }
                 
-                if (subtitle1Found) {
+                // 对于"即将完成"页面，只要标题匹配就认为是验证页面，不强制要求副标题匹配
+                if (subtitle1Found || foundTitle.includes('即将完成') || foundTitle.includes('Almost done')) {
                     isVerificationPage = true;
                     pageType = 'almost_done';
                 }
@@ -761,8 +783,13 @@ export class PageExceptionDetector {
                 this.bot.log(this.bot.isMobile, '页面检测', `[${email}] 检测到身份验证页面: ${foundTitle} (类型: ${pageType})`);
                 
                 if (pageType === 'almost_done') {
-                    // 处理"即将完成"页面
-                    return await this.handleAlmostDonePage(page, email);
+                    // 只返回检测结果，不执行处理（由VerificationCodeHandler处理）
+                    return {
+                        detected: true,
+                        pageType: 'almost_done',
+                        action: 'detected_only',
+                        message: '检测到即将完成页面'
+                    };
                 } else if (pageType === 'verify_identity') {
                     // 处理"验证你的身份"页面
                     return await this.handleVerifyIdentityPage(page, email);
@@ -780,6 +807,7 @@ export class PageExceptionDetector {
      * 处理"即将完成"页面
      */
     private async handleAlmostDonePage(page: Page, email: string): Promise<PageExceptionResult> {
+        this.bot.log(this.bot.isMobile, '页面检测', `[${email}] handleAlmostDonePage - 开始处理"即将完成"页面`);
         // 根据设备类型点击相应的链接
         if (this.bot.isMobile) {
             // 移动端：点击包含"发送电子邮件"的链接
@@ -823,6 +851,7 @@ export class PageExceptionDetector {
         } else {
             // 桌面端：点击包含"将代码发送"的链接
             const desktopLinkTexts = [
+                '将代码发送到',
                 '将代码发送',
                 'Send code to',
                 'Send the code to',

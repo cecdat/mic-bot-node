@@ -42,47 +42,70 @@ check_docker() {
     fi
 }
 
-# 创建默认配置文件
+# 创建默认配置文件（基于node-1模板）
 create_default_config() {
     local config_file=$1
     local node_name=$2
     
+    print_color $BLUE "   使用内置配置模板生成配置文件"
+    
+    # 使用node-1的config.json作为模板（内嵌在脚本中）
     cat > "$config_file" << EOF
 {
-  "apiServer": {
-    "enabled": true,
-    "updateUrl": "$DEFAULT_SERVER_URL",
-    "token": "YOUR_TOKEN_HERE",
-    "nodeName": "$node_name",
-    "heartbeatInterval": "5m",
-    "heartbeatTimeout": "30s"
-  },
-  "browser": {
+    "baseURL": "https://rewards.bing.com",
+    "sessionPath": "sessions",
     "headless": true,
-    "slowMo": 100,
-    "timeout": 30000
-  },
-  "workers": {
-    "doSearch": true,
-    "doDailyCheckIn": true,
-    "doPunchCards": true,
-    "doDesktopSearch": true,
-    "doMobileSearch": true,
-    "doThisOrThat": true,
-    "doQuiz": true,
-    "doABC": true,
-    "doReadToEarn": true,
-    "doUrlReward": true
-  },
-  "search": {
-    "delayMin": 1000,
-    "delayMax": 3000,
-    "searchTerms": []
-  },
-  "snapshots": {
-    "taskExecution": false,
-    "searchResults": false
-  }
+    "parallel": false,
+    "runOnZeroPoints": false,
+    "debug": false,
+    "snapshots": {
+        "login": false,
+        "taskExecution": false,
+        "cookies": false
+    },
+    "debugOptions": {
+        "saveTaskDebugInfo": false,
+        "saveTaskScreenshots": false,
+        "saveTaskHtml": false,
+        "logTaskDetails": false
+    },
+    "saveFingerprint": {
+        "mobile": false,
+        "desktop": false
+    },
+    "recording": {
+        "enableVideo": false,
+        "enableHar": false,
+        "videoDir": "sessions/task_videos",
+        "videoSize": {
+            "width": 1280,
+            "height": 720
+        }
+    },
+    "workers": {
+        "doDailySet": true,
+        "doMorePromotions": true,
+        "doPunchCards": true,
+        "doDesktopSearch": true,
+        "doMobileSearch": true,
+        "doDailyCheckIn": true,
+        "doReadToEarn": true
+    },
+    "searchOnBingLocalQueries": true,
+    "globalTimeout": "30s",
+    "navigationTimeout": "120s",
+    "apiServer": {
+        "enabled": true,
+        "updateUrl": "$DEFAULT_SERVER_URL",
+        "token": "YOUR_TOKEN_HERE",
+        "nodeName": "$node_name",
+        "heartbeatInterval": "45s",
+        "heartbeatTimeout": "10m"
+    },
+    "hotSearchApi": {
+        "enabled": true,
+        "baseUrl": "https://hots.237890.xyz"
+    }
 }
 EOF
 }
@@ -280,17 +303,19 @@ show_completion_info() {
     done
     
     print_color $YELLOW "重要提醒:"
-    print_color $YELLOW "1. 请编辑每个节点的配置文件，修改以下内容:"
+    print_color $YELLOW "1. 配置文件基于内置模板生成（参考node-1配置）"
+    print_color $YELLOW "2. 请编辑每个节点的配置文件，修改以下内容:"
     print_color $YELLOW "   - token: 设置正确的认证令牌"
     print_color $YELLOW "   - updateUrl: 设置正确的服务器地址"
+    print_color $YELLOW "   - nodeName: 确保节点名称唯一"
     print_color $YELLOW ""
-    print_color $YELLOW "2. 配置文件位置:"
+    print_color $YELLOW "3. 配置文件位置:"
     for i in $(seq 1 $node_count); do
         print_color $YELLOW "   - ../../node/node-$i/config.json"
     done
     
     print_color $YELLOW ""
-    print_color $YELLOW "3. 常用命令:"
+    print_color $YELLOW "4. 常用命令:"
     print_color $YELLOW "   查看日志: docker-compose -f $COMPOSE_FILE logs"
     print_color $YELLOW "   停止服务: docker-compose -f $COMPOSE_FILE down"
     print_color $YELLOW "   重启服务: docker-compose -f $COMPOSE_FILE restart"

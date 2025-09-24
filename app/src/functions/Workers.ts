@@ -988,26 +988,187 @@ export class Workers {
             this.bot.log(this.bot.isMobile, '必应搜索', `执行必应搜索活动: ${activity.title}`);
             
             // 等待页面加载
-            await this.bot.utils.wait(5000);
+            await this.bot.utils.wait(3000);
+            
+            // 检查当前页面状态
+            const currentUrl = page.url();
+            const pageTitle = await page.title();
+            this.bot.log(this.bot.isMobile, '必应搜索', `当前页面URL: ${currentUrl}`);
+            this.bot.log(this.bot.isMobile, '必应搜索', `当前页面标题: ${pageTitle}`);
+            
+            // 如果页面不在 Bing 搜索页面，尝试跳转
+            if (!currentUrl.includes('bing.com') || currentUrl.includes('rewards.bing.com')) {
+                this.bot.log(this.bot.isMobile, '必应搜索', '页面不在 Bing 搜索页面，正在跳转...');
+                await page.goto('https://www.bing.com', { waitUntil: 'networkidle' });
+                await this.bot.utils.wait(5000);
+                
+                // 再次检查页面状态
+                const newUrl = page.url();
+                const newTitle = await page.title();
+                this.bot.log(this.bot.isMobile, '必应搜索', `跳转后URL: ${newUrl}`);
+                this.bot.log(this.bot.isMobile, '必应搜索', `跳转后标题: ${newTitle}`);
+                
+                // 如果还在 Rewards 页面，再次强制跳转
+                if (newUrl.includes('rewards.bing.com')) {
+                    this.bot.log(this.bot.isMobile, '必应搜索', '仍在 Rewards 页面，强制跳转到 Bing 搜索页面...');
+                    await page.goto('https://www.bing.com', { waitUntil: 'networkidle' });
+                    await this.bot.utils.wait(3000);
+                    
+                    const finalUrl = page.url();
+                    const finalTitle = await page.title();
+                    this.bot.log(this.bot.isMobile, '必应搜索', `强制跳转后URL: ${finalUrl}`);
+                    this.bot.log(this.bot.isMobile, '必应搜索', `强制跳转后标题: ${finalTitle}`);
+                }
+            }
             
             // 尝试关闭所有消息提示
             await this.tryDismissAllMessages(page);
             
-            // 获取搜索查询
-            const query = await this.getSearchQuery(activity.title);
+            // 获取搜索查询 - 使用账户专属搜索词
+            const query = await this.getAccountSearchQuery();
+            this.bot.log(this.bot.isMobile, '必应搜索', `🔍 准备执行搜索，搜索词: "${query}"`);
             
-            // 查找搜索框
-            const searchBar = '#sb_form_q';
-            await page.waitForSelector(searchBar, { state: 'visible', timeout: 10000 });
+            // 查找搜索框 - 尝试多个选择器
+            const searchBarSelectors = [
+                '#sb_form_q',           // 标准选择器
+                'input[name="q"]',      // 备用选择器1
+                'input[type="search"]', // 备用选择器2
+                '.b_searchbox',         // 备用选择器3
+                '#searchbox'            // 备用选择器4
+            ];
             
-            // 执行搜索
+            let searchBar = null;
+            let usedSelector = '';
+            
+            for (const selector of searchBarSelectors) {
+                try {
+                    this.bot.log(this.bot.isMobile, '必应搜索', `尝试查找搜索框: ${selector}`);
+                    await page.waitForSelector(selector, { state: 'visible', timeout: 3000 });
+                    searchBar = selector;
+                    usedSelector = selector;
+                    this.bot.log(this.bot.isMobile, '必应搜索', `✅ 找到搜索框: ${selector}`);
+                    break;
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, '必应搜索', `❌ 未找到搜索框: ${selector}`, 'warn');
+                    continue;
+                }
+            }
+            
+            if (!searchBar) {
+                throw new Error('无法找到任何搜索框选择器');
+            }
+            
+            // 执行搜索 - 添加仿真操作
+            this.bot.log(this.bot.isMobile, '必应搜索', `🖱️ 点击搜索框: ${usedSelector}`);
+            
+            // 仿真鼠标移动到搜索框
+            await page.hover(searchBar);
+            await this.bot.utils.wait(200);
+            
+            // 点击搜索框
             await page.click(searchBar);
             await this.bot.utils.wait(500);
-            await page.keyboard.type(query);
-            await page.keyboard.press('Enter');
-            await this.bot.utils.wait(3000);
             
-            this.bot.log(this.bot.isMobile, '必应搜索', '必应搜索活动完成');
+            // 清空搜索框（如果有内容）
+            await page.keyboard.press('Control+a');
+            await this.bot.utils.wait(100);
+            
+            this.bot.log(this.bot.isMobile, '必应搜索', `⌨️ 输入搜索词: "${query}"`);
+            
+            // 仿真逐字符输入
+            for (let i = 0; i < query.length; i++) {
+                await page.keyboard.type(query[i]);
+                await this.bot.utils.wait(50 + Math.random() * 100); // 随机延迟50-150ms
+            }
+            
+            await this.bot.utils.wait(1000);
+            
+            this.bot.log(this.bot.isMobile, '必应搜索', `⏎ 按回车键执行搜索`);
+            await page.keyboard.press('Enter');
+            
+            // 等待搜索结果加载 - 等待搜索结果页面出现
+            try {
+                await page.waitForSelector('#b_results', { timeout: 30000 });
+                this.bot.log(this.bot.isMobile, '必应搜索', '✅ 搜索结果页面加载完成');
+            } catch (error) {
+                this.bot.log(this.bot.isMobile, '必应搜索', '⚠️ 搜索结果页面加载超时，继续执行', 'warn');
+            }
+            
+            // 检查搜索是否成功
+            const searchResultUrl = page.url();
+            const searchResultTitle = await page.title();
+            this.bot.log(this.bot.isMobile, '必应搜索', `🔍 搜索完成，结果页面URL: ${searchResultUrl}`);
+            this.bot.log(this.bot.isMobile, '必应搜索', `🔍 搜索完成，结果页面标题: ${searchResultTitle}`);
+            
+            // 仿真用户浏览搜索结果
+            await this.simulateSearchResultBrowsing(page);
+            
+            // 等待积分更新 - 给系统时间处理积分
+            this.bot.log(this.bot.isMobile, '必应搜索', '⏳ 等待积分更新...');
+            await this.bot.utils.wait(5000);
+            
+            // 应用搜索延迟配置
+            if (this.bot.isMobile) {
+                // 移动端使用更长的延迟，模拟真实用户行为
+                const mobileMinDelay = this.bot.utils.stringToMs('8s');
+                const mobileMaxDelay = this.bot.utils.stringToMs('20s');
+                
+                const minDelay = this.bot.config.searchSettings?.searchDelay?.min
+                    ? this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.min)
+                    : mobileMinDelay;
+                
+                const maxDelay = this.bot.config.searchSettings?.searchDelay?.max
+                    ? this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.max)
+                    : mobileMaxDelay;
+
+                const delay = Math.floor(this.bot.utils.randomNumber(minDelay, maxDelay));
+                this.bot.log(this.bot.isMobile, '必应搜索', `移动端搜索间隔: ${delay}ms`);
+                await this.bot.utils.wait(delay);
+            } else {
+                // 桌面端保持原有逻辑
+                const defaultMinDelay = this.bot.utils.stringToMs('5s');
+                const defaultMaxDelay = this.bot.utils.stringToMs('15s');
+
+                const minDelay = this.bot.config.searchSettings?.searchDelay?.min
+                    ? this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.min)
+                    : defaultMinDelay;
+                
+                const maxDelay = this.bot.config.searchSettings?.searchDelay?.max
+                    ? this.bot.utils.stringToMs(this.bot.config.searchSettings.searchDelay.max)
+                    : defaultMaxDelay;
+
+                const delay = Math.floor(this.bot.utils.randomNumber(minDelay, maxDelay));
+                this.bot.log(this.bot.isMobile, '必应搜索', `桌面端搜索间隔: ${delay}ms`);
+                await this.bot.utils.wait(delay);
+            }
+            
+            // 检查积分变化（可选）
+            try {
+                const dashboardData = await this.bot.browser.func.getDashboardData(page);
+                if (dashboardData && dashboardData.userStatus && dashboardData.userStatus.counters) {
+                    if (this.bot.isMobile) {
+                        // 移动端模式：显示移动端搜索积分
+                        const mobileSearch = dashboardData.userStatus.counters.mobileSearch?.[0];
+                        if (mobileSearch) {
+                            this.bot.log(this.bot.isMobile, '必应搜索', `📊 当前移动端搜索积分: ${mobileSearch.pointProgress}/${mobileSearch.pointProgressMax}`);
+                        } else {
+                            this.bot.log(this.bot.isMobile, '必应搜索', '未找到移动端搜索积分数据', 'warn');
+                        }
+                    } else {
+                        // 桌面端模式：显示桌面端搜索积分
+                        const pcSearch = dashboardData.userStatus.counters.pcSearch?.[0];
+                        if (pcSearch) {
+                            this.bot.log(this.bot.isMobile, '必应搜索', `📊 当前桌面端搜索积分: ${pcSearch.pointProgress}/${pcSearch.pointProgressMax}`);
+                        } else {
+                            this.bot.log(this.bot.isMobile, '必应搜索', '未找到桌面端搜索积分数据', 'warn');
+                        }
+                    }
+                }
+            } catch (error) {
+                this.bot.log(this.bot.isMobile, '必应搜索', '获取积分信息时出错，跳过积分检查', 'warn');
+            }
+            
+            this.bot.log(this.bot.isMobile, '必应搜索', '✅ 必应搜索活动完成');
             return true;
             
         } catch (error) {
@@ -1228,7 +1389,188 @@ export class Workers {
     }
 
     /**
-     * 获取搜索查询
+     * 获取账户专属搜索查询
+     */
+    private async getAccountSearchQuery(): Promise<string> {
+        if (!this.bot.account?.email) {
+            this.bot.log(this.bot.isMobile, '搜索查询', '账户信息不可用，使用默认搜索词', 'warn');
+            return 'microsoft rewards';
+        }
+
+        try {
+            // 使用与正常搜索任务相同的逻辑获取搜索词
+            const allQueries = await this.getLocalSearchWords(this.bot.account.email);
+            const uniqueQueries = [...new Set(allQueries)];
+            
+            if (uniqueQueries.length > 0) {
+                // 随机选择一个搜索词
+                const randomIndex = Math.floor(Math.random() * uniqueQueries.length);
+                const selectedQuery = uniqueQueries[randomIndex];
+                this.bot.log(this.bot.isMobile, '搜索查询', `从账户专属词库选择搜索词: "${selectedQuery}"`);
+                return selectedQuery;
+            } else {
+                this.bot.log(this.bot.isMobile, '搜索查询', '未找到搜索词，使用默认搜索词', 'warn');
+                return 'microsoft rewards';
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '搜索查询', `获取账户搜索词时出错: ${errorMessage}，使用默认搜索词`, 'warn');
+            return 'microsoft rewards';
+        }
+    }
+
+    /**
+     * 获取本地搜索词（与Search.ts中的逻辑相同）
+     */
+    protected async getLocalSearchWords(email: string): Promise<string[]> {
+        const fs = require('fs');
+        const path = require('path');
+        
+        // Python脚本现在会把所有搜索词文件输出到 dist/search_terms/ 目录下
+        const baseDir = path.join(__dirname, '..', '..', 'dist', 'search_terms');
+        const userFilePath = path.join(baseDir, `${email}.txt`);
+        const defaultFilePath = path.join(baseDir, 'default.txt');
+        
+        this.bot.log(this.bot.isMobile, '搜索-本地词库', `🔍 搜索词目录: ${baseDir}`);
+        this.bot.log(this.bot.isMobile, '搜索-本地词库', `🔍 用户文件路径: ${userFilePath}`);
+        this.bot.log(this.bot.isMobile, '搜索-本地词库', `🔍 默认文件路径: ${defaultFilePath}`);
+        
+        let filePathToUse: string;
+
+        if (fs.existsSync(userFilePath)) {
+            this.bot.log(this.bot.isMobile, '搜索-本地词库', `✅ 发现账户 ${email} 的专属搜索词文件，正在加载...`);
+            filePathToUse = userFilePath;
+        } else {
+            this.bot.log(this.bot.isMobile, '搜索-本地词库', `⚠️ 未找到账户 ${email} 的专属搜索词文件，将使用通用热搜词。`);
+            filePathToUse = defaultFilePath;
+        }
+
+        try {
+            if (!fs.existsSync(filePathToUse)) {
+                this.bot.log(this.bot.isMobile, '搜索-本地词库', `❌ 搜索词文件不存在: ${filePathToUse}`, 'warn');
+                return [];
+            }
+
+            const content = fs.readFileSync(filePathToUse, 'utf8');
+            const queries = content.split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0);
+            
+            this.bot.log(this.bot.isMobile, '搜索-本地词库', `📚 成功加载 ${queries.length} 个搜索词`);
+            return queries;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '搜索-本地词库', `读取搜索词文件时出错: ${errorMessage}`, 'error');
+            return [];
+        }
+    }
+
+    /**
+     * 仿真用户浏览搜索结果
+     */
+    private async simulateSearchResultBrowsing(page: any): Promise<void> {
+        try {
+            this.bot.log(this.bot.isMobile, '必应搜索', '🎭 开始仿真用户浏览搜索结果...');
+            
+            // 1. 向下滚动页面
+            const scrollY1 = 300 + Math.random() * 200; // 300-500px
+            this.bot.log(this.bot.isMobile, '必应搜索', `📜 向下滚动页面到坐标 (0, ${Math.round(scrollY1)})...`);
+            await page.evaluate((y) => {
+                window.scrollTo(0, y);
+            }, scrollY1);
+            await this.bot.utils.wait(1000 + Math.random() * 1000); // 1-2秒随机等待
+            
+            // 2. 继续向下滚动
+            const scrollY2 = 600 + Math.random() * 300; // 600-900px
+            this.bot.log(this.bot.isMobile, '必应搜索', `📜 继续向下滚动到坐标 (0, ${Math.round(scrollY2)})...`);
+            await page.evaluate((y) => {
+                window.scrollTo(0, y);
+            }, scrollY2);
+            await this.bot.utils.wait(1000 + Math.random() * 1000); // 1-2秒随机等待
+            
+            // 3. 尝试点击一个搜索结果
+            try {
+                this.bot.log(this.bot.isMobile, '必应搜索', '🖱️ 尝试点击搜索结果...');
+                
+                // 查找搜索结果链接
+                const searchResultSelectors = [
+                    'h2 a',                    // 标准搜索结果标题链接
+                    '.b_title a',             // Bing 搜索结果标题
+                    '.b_algo h2 a',           // 算法搜索结果
+                    '.b_result h2 a',         // 结果标题
+                    'a[href*="http"]:not([href*="bing.com"])' // 外部链接
+                ];
+                
+                let clicked = false;
+                for (const selector of searchResultSelectors) {
+                    try {
+                        const elements = await page.$$(selector);
+                        if (elements.length > 0) {
+                            // 随机选择一个结果
+                            const randomIndex = Math.floor(Math.random() * Math.min(elements.length, 3));
+                            const element = elements[randomIndex];
+                            
+                            // 滚动到元素可见
+                            await element.scrollIntoViewIfNeeded();
+                            await this.bot.utils.wait(500);
+                            
+                            // 获取链接URL
+                            const href = await element.getAttribute('href');
+                            
+                            // 点击元素
+                            await element.click();
+                            this.bot.log(this.bot.isMobile, '必应搜索', `✅ 成功点击搜索结果 (选择器: ${selector})`);
+                            this.bot.log(this.bot.isMobile, '必应搜索', `🔗 点击的URL: ${href || '未知'}`);
+                            clicked = true;
+                            break;
+                        }
+                    } catch (error) {
+                        continue;
+                    }
+                }
+                
+                if (!clicked) {
+                    this.bot.log(this.bot.isMobile, '必应搜索', '⚠️ 未找到可点击的搜索结果，跳过点击', 'warn');
+                }
+                
+            } catch (error) {
+                this.bot.log(this.bot.isMobile, '必应搜索', '⚠️ 点击搜索结果时出错，跳过点击', 'warn');
+            }
+            
+            // 4. 随机等待5-10秒
+            const waitTime = 5000 + Math.random() * 5000; // 5-10秒
+            this.bot.log(this.bot.isMobile, '必应搜索', `⏱️ 随机等待 ${Math.round(waitTime/1000)} 秒...`);
+            await this.bot.utils.wait(waitTime);
+            
+            // 5. 返回搜索结果页面（如果点击了链接）
+            try {
+                const currentUrl = page.url();
+                if (!currentUrl.includes('bing.com/search')) {
+                    this.bot.log(this.bot.isMobile, '必应搜索', '🔙 返回搜索结果页面...');
+                    await page.goBack();
+                    await this.bot.utils.wait(2000);
+                }
+            } catch (error) {
+                this.bot.log(this.bot.isMobile, '必应搜索', '⚠️ 返回搜索结果页面时出错', 'warn');
+            }
+            
+            // 6. 向上滚动回到顶部
+            this.bot.log(this.bot.isMobile, '必应搜索', '📜 滚动回到页面顶部 (0, 0)...');
+            await page.evaluate(() => {
+                window.scrollTo(0, 0);
+            });
+            await this.bot.utils.wait(1000);
+            
+            this.bot.log(this.bot.isMobile, '必应搜索', '✅ 仿真用户浏览完成');
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.bot.log(this.bot.isMobile, '必应搜索', `仿真浏览时出错: ${errorMessage}`, 'warn');
+        }
+    }
+
+    /**
+     * 获取搜索查询（保留原有方法用于兼容性）
      */
     private async getSearchQuery(title: string): Promise<string> {
         // 确保title不为空

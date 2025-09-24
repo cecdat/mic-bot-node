@@ -310,7 +310,7 @@ export class Search extends Workers {
     }
 
     // [核心修改] getLocalSearchWords 现在能智能加载专属或默认的词库
-    private async getLocalSearchWords(email: string): Promise<string[]> {
+    protected async getLocalSearchWords(email: string): Promise<string[]> {
         // Python脚本现在会把所有搜索词文件输出到 dist/search_terms/ 目录下
         // 在编译后的代码中，__dirname 指向 dist/functions/activities/，需要回到 dist/ 目录
         const baseDir = path.join(__dirname, '..', '..', 'search_terms');

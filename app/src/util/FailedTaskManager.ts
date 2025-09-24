@@ -16,11 +16,18 @@ export class FailedTaskManager {
     private failedTasks: Map<string, FailedTask> = new Map();
     private filePath: string;
     private maxRetries: number = 3;
+    private isSessionMode: boolean = true; // 新增：会话模式，重启后丢弃
 
-    constructor(sessionPath: string, maxRetries: number = 3) {
+    constructor(sessionPath: string, maxRetries: number = 3, isSessionMode: boolean = true) {
         this.filePath = path.join(sessionPath, 'failed_tasks.json');
         this.maxRetries = maxRetries;
-        this.loadFailedTasks();
+        this.isSessionMode = isSessionMode;
+        
+        // 会话模式下不加载持久化的失败任务
+        if (!isSessionMode) {
+            this.loadFailedTasks();
+        }
+        // 会话模式：重启后丢弃失败任务（静默模式，不输出日志）
     }
 
     /**
@@ -36,7 +43,11 @@ export class FailedTaskManager {
         };
         
         this.failedTasks.set(id, failedTask);
-        this.saveFailedTasks();
+        
+        // 会话模式下不立即保存，等所有任务完成后统一处理
+        if (!this.isSessionMode) {
+            this.saveFailedTasks();
+        }
         
         console.log(`[失败任务管理] 添加失败任务: ${id} - ${task.reason}`);
         return id;

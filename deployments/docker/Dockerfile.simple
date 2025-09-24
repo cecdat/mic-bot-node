@@ -14,8 +14,8 @@ RUN npm install
 
 COPY app/ ./
 
-# 编译 TypeScript
-RUN npx tsc
+# 递增版本号并编译 TypeScript
+RUN npm run version:bump && npx tsc
 
 # 安装 Python 依赖
 COPY app/requirements.txt ./

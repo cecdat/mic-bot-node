@@ -74,46 +74,120 @@ export default class BrowserFunc {
                 throw new Error(`页面加载失败，已重试${maxRetries}次`);
             }
 
-            const scriptContent = await page.evaluate(() => {
-                const scripts = Array.from(document.querySelectorAll('script'));
-                const targetScript = scripts.find(script => script.innerText.includes('var dashboard'));
-                return targetScript?.innerText || null;
-            });
+            // 移动端需要更长的等待时间和不同的脚本查找策略
+            const waitTime = this.bot.isMobile ? 5000 : 3000;
+            const maxScriptRetries = this.bot.isMobile ? 5 : 3;
             
-            if (!scriptContent) {
-                // 尝试等待更长时间再重试
-                this.bot.log(this.bot.isMobile, '仪表板数据', '未找到仪表板脚本，等待3秒后重试...', 'warn');
-                await page.waitForTimeout(3000);
-                
-                const retryScriptContent = await page.evaluate(() => {
+            let scriptContent = null;
+            let scriptRetryCount = 0;
+            
+            while (!scriptContent && scriptRetryCount < maxScriptRetries) {
+                scriptContent = await page.evaluate(() => {
                     const scripts = Array.from(document.querySelectorAll('script'));
-                    const targetScript = scripts.find(script => script.innerText.includes('var dashboard'));
-                    return targetScript?.innerText || null;
+                    // 尝试多种脚本查找模式
+                    const patterns = [
+                        'var dashboard',
+                        'window.dashboard',
+                        'dashboard =',
+                        'userStatus',
+                        'availablePoints'
+                    ];
+                    
+                    for (const pattern of patterns) {
+                        const targetScript = scripts.find(script => 
+                            script.innerText && script.innerText.includes(pattern)
+                        );
+                        if (targetScript) {
+                            return targetScript.innerText;
+                        }
+                    }
+                    return null;
                 });
                 
-                if (!retryScriptContent) {
-                    throw new Error('在脚本中未找到仪表板数据，页面可能未完全加载');
+                if (!scriptContent) {
+                    scriptRetryCount++;
+                    this.bot.log(this.bot.isMobile, '仪表板数据', `未找到仪表板脚本 (${scriptRetryCount}/${maxScriptRetries})，等待${waitTime/1000}秒后重试...`, 'warn');
+                    
+                    if (scriptRetryCount < maxScriptRetries) {
+                        await page.waitForTimeout(waitTime);
+                        
+                        // 尝试刷新页面（仅移动端）
+                        if (this.bot.isMobile && scriptRetryCount === 2) {
+                            this.bot.log(this.bot.isMobile, '仪表板数据', '移动端页面刷新...');
+                            await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
+                            await page.waitForTimeout(3000);
+                        }
+                    }
                 }
-                
-                const dashboardData = await page.evaluate(scriptContent => {
-                    const regex = /var dashboard = (\{.*?\});/s;
-                    const match = regex.exec(scriptContent);
-                    return match?.[1] ? JSON.parse(match[1]) : null;
-                }, retryScriptContent);
-                
-                if (!dashboardData) throw new Error('无法解析仪表板脚本');
-                
-                this.bot.log(this.bot.isMobile, '仪表板数据', '重试成功获取仪表板数据。');
-                return dashboardData;
+            }
+            
+            if (!scriptContent) {
+                throw new Error(`在脚本中未找到仪表板数据，页面可能未完全加载（已重试${maxScriptRetries}次）`);
             }
 
             const dashboardData = await page.evaluate(scriptContent => {
-                const regex = /var dashboard = (\{.*?\});/s;
-                const match = regex.exec(scriptContent);
-                return match?.[1] ? JSON.parse(match[1]) : null;
+                // 尝试多种正则表达式模式来解析仪表板数据
+                const patterns = [
+                    /var dashboard = (\{.*?\});/s,
+                    /window\.dashboard = (\{.*?\});/s,
+                    /dashboard = (\{.*?\});/s,
+                    /const dashboard = (\{.*?\});/s,
+                    /let dashboard = (\{.*?\});/s
+                ];
+                
+                for (const pattern of patterns) {
+                    const match = pattern.exec(scriptContent);
+                    if (match && match[1]) {
+                        try {
+                            return JSON.parse(match[1]);
+                        } catch (e) {
+                            continue; // 尝试下一个模式
+                        }
+                    }
+                }
+                
+                // 如果正则表达式失败，尝试直接查找JSON对象
+                try {
+                    const jsonMatch = scriptContent.match(/\{.*"userStatus".*\}/s);
+                    if (jsonMatch) {
+                        return JSON.parse(jsonMatch[0]);
+                    }
+                } catch (e) {
+                    // 忽略解析错误
+                }
+                
+                return null;
             }, scriptContent);
 
-            if (!dashboardData) throw new Error('无法解析仪表板脚本');
+            if (!dashboardData) {
+                this.bot.log(this.bot.isMobile, '仪表板数据', '无法解析仪表板脚本，尝试备用方法...', 'warn');
+                
+                // 备用方法：直接尝试从页面获取数据
+                try {
+                    const fallbackData = await page.evaluate(() => {
+                        // 尝试从全局变量获取数据
+                        if ((window as any).dashboard) {
+                            return (window as any).dashboard;
+                        }
+                        
+                        // 尝试从其他可能的全局变量获取
+                        if ((window as any).userStatus) {
+                            return { userStatus: (window as any).userStatus };
+                        }
+                        
+                        return null;
+                    });
+                    
+                    if (fallbackData) {
+                        this.bot.log(this.bot.isMobile, '仪表板数据', '使用备用方法成功获取仪表板数据');
+                        return fallbackData;
+                    }
+                } catch (e) {
+                    this.bot.log(this.bot.isMobile, '仪表板数据', `备用方法也失败: ${e}`, 'warn');
+                }
+                
+                throw new Error('无法解析仪表板脚本，所有方法都失败');
+            }
             
             // 验证关键数据是否存在
             if (!dashboardData.userStatus || !dashboardData.userStatus.availablePoints) {

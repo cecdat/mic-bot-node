@@ -122,23 +122,53 @@ export class Login {
             
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 🔍 检查登录状态 - URL: ${currentUrl}, 标题: ${title}`);
             
-            // 如果已经在rewards.bing.com且标题包含Microsoft Rewards，说明已登录
-            if (currentUrl.includes('rewards.bing.com') && title.includes('Microsoft Rewards')) {
+            // 如果已经在rewards.bing.com且标题包含Microsoft Rewards相关关键词，说明已登录
+            const rewardsTitleKeywords = [
+                'Microsoft Rewards',
+                'Bing Rewards', 
+                'Rewards',
+                'Microsoft 奖励',
+                'Bing 奖励',
+                '奖励'
+            ];
+            
+            if (currentUrl.includes('rewards.bing.com') && 
+                rewardsTitleKeywords.some(keyword => title.includes(keyword))) {
                 this.bot.log(this.bot.isMobile, '登录', `[${email}] ✅ 检测到已在Microsoft Rewards页面，已登录`);
                 return true;
             }
 
-            // 检查是否有登录状态的DOM元素 - 增加更多检查条件
+            // 首先检查是否在登录页面，如果是则直接返回未登录
+            if (currentUrl.includes('login.live.com') || currentUrl.includes('login.microsoft.com')) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 🔍 当前在登录页面，未登录`);
+                return false;
+            }
+
+            // 检查是否有登录状态的DOM元素 - 增加更多检查条件（支持中英文）
             const loginIndicators = [
                 'html[data-role-name="RewardsPortal"]',
                 '[data-testid="user-avatar"]',
                 '.user-avatar',
                 '[aria-label*="账户"]',
+                '[aria-label*="Account"]',
+                '[aria-label*="Profile"]',
                 '[id*="mectrl"]',
                 '[class*="profile"]',
+                '[class*="account"]',
                 'a[href*="Signout"]',
                 'a:has-text("注销")',
-                'a:has-text("Sign out")'
+                'a:has-text("Sign out")',
+                'a:has-text("Sign Out")',
+                'button:has-text("Sign out")',
+                'button:has-text("Sign Out")',
+                '.account-info',
+                '.profile_img',
+                '#img_sec',
+                '#redirect_info_link',
+                'text=points',
+                'text=积分',
+                'text=Rewards',
+                'text=奖励'
             ];
 
             for (const selector of loginIndicators) {
@@ -152,6 +182,19 @@ export class Login {
                     // 继续检查下一个选择器
                     continue;
                 }
+            }
+
+            // 特殊处理 identityBanner - 只有在 rewards.bing.com 页面才认为是登录状态
+            try {
+                const identityBanner = await page.waitForSelector('[data-testid="identityBanner"]', { timeout: 2000 });
+                if (identityBanner && currentUrl.includes('rewards.bing.com')) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] ✅ 检测到 identityBanner 且在 rewards 页面，已登录`);
+                    return true;
+                } else if (identityBanner) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] ⚠️ 检测到 identityBanner 但不在 rewards 页面，忽略`);
+                }
+            } catch (error) {
+                // identityBanner 不存在，继续其他检查
             }
 
             // 检查页面是否包含用户邮箱信息
@@ -555,6 +598,17 @@ export class Login {
                         if (exceptionResult.pageType === 'account_locked') {
                             throw new Error('账户已锁定，无法继续登录');
                         }
+                        
+                        // 如果检测到邮箱验证页面，处理辅助邮箱验证
+                        if (exceptionResult.pageType === 'email_verification') {
+                            this.bot.log(this.bot.isMobile, '登录', '开始处理辅助邮箱验证...');
+                            const verificationSuccess = await this.handleAuxiliaryEmailVerification(page, email);
+                            if (verificationSuccess) {
+                                this.bot.log(this.bot.isMobile, '登录', '辅助邮箱验证处理成功');
+                            } else {
+                                this.bot.log(this.bot.isMobile, '登录', '辅助邮箱验证处理失败', 'warn');
+                            }
+                        }
                     }
                 } catch (exceptionError) {
                     this.bot.log(this.bot.isMobile, '登录', 
@@ -625,20 +679,36 @@ export class Login {
             this.bot.log(this.bot.isMobile, '登录', `检查验证页面 - URL: "${currentUrl}", 标题: "${title}"`);
             
             // 如果已经在rewards.bing.com或Microsoft Rewards页面，说明已经登录成功
-            if (currentUrl.includes('rewards.bing.com') || title.includes('Microsoft Rewards')) {
+            // 注意：只检查URL是否以rewards.bing.com开头，避免匹配到redirect_uri参数
+            if ((currentUrl.startsWith('https://rewards.bing.com') || currentUrl.startsWith('http://rewards.bing.com')) || 
+                title.includes('Microsoft Rewards')) {
                 this.bot.log(this.bot.isMobile, '登录', '检测到已在Microsoft Rewards页面，非验证页面');
                 return false;
             }
             
-            // 检查是否已经登录（通过DOM元素）
+            // 优先检查页面内容是否包含验证相关元素（更可靠）
+            const pageText = await page.textContent('body');
+            if (pageText && (pageText.includes('将代码发送到') || pageText.includes('发送电子邮件') || 
+                pageText.includes('验证你的身份') || pageText.includes('只需再执行一步') ||
+                pageText.includes('向') && pageText.includes('发送电子邮件'))) {
+                this.bot.log(this.bot.isMobile, '登录', '通过页面内容检测到验证页面');
+                return true;
+            }
+            
+            // 检查页面标题（作为备用检查）
+            if (title.includes('即将完成') || title.includes('Almost done') || 
+                title.includes('验证你的身份') || title.includes('Verify your identity')) {
+                this.bot.log(this.bot.isMobile, '登录', '通过页面标题检测到验证页面');
+                return true;
+            }
+            
             const isLoggedIn = await this.checkLoggedInStatus(page, '');
             if (isLoggedIn) {
                 this.bot.log(this.bot.isMobile, '登录', '检测到已登录状态，非验证页面');
                 return false;
             }
             
-            // 检查页面内容
-            const pageText = await page.textContent('body');
+            // 检查页面内容（pageText已在上面获取）
             
             // 检查是否是"验证你的电子邮件"页面
             if (title.includes('验证你的电子邮件') || title.includes('Verify your email')) {
@@ -1113,33 +1183,109 @@ export class Login {
     private async checkLoggedIn(page: Page, email: string) {
         this.bot.log(this.bot.isMobile, '登录', `[${email}] 正在验证登录后状态...`);
         try {
-            // 增强导航等待逻辑，增加更多成功条件
-            const navigationPromise = page.waitForURL((url: URL) => {
-                return url.href.includes('rewards.bing.com') || 
-                       url.href.includes('bing.com/rewards') || 
-                       url.href.includes('login.live.com/oauth20_desktop.srf');
-            }, {
-                timeout: 90000,  // 增加超时时间
-                waitUntil: 'domcontentloaded'  // 修复类型不匹配问题
-            });
-    
-            const intermediatePageHandler = (async () => {
-                while (!page.isClosed() && !page.url().includes('rewards.bing.com')) {
-                    await this.dismissLoginMessages(page, email);
-                    await this.handleVerifyEmailPage(page, email);
-                    await this.handleOtherVerificationPages(page, email);  // 增加新的验证页面处理
-                    await this.bot.utils.wait(1000);
+            // 首先等待一段时间让页面稳定
+            await page.waitForTimeout(3000);
+            
+            // 检查当前页面状态
+            const currentUrl = page.url();
+            const pageTitle = await page.title();
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 当前页面URL: ${currentUrl}`);
+            this.bot.log(this.bot.isMobile, '登录', `[${email}] 当前页面标题: ${pageTitle}`);
+            
+            // 如果已经在目标页面，直接返回成功
+            if (currentUrl.includes('rewards.bing.com') || currentUrl.includes('bing.com/rewards')) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 已在目标页面，登录成功`);
+                return;
+            }
+            
+            // 处理中间页面和弹窗
+            let attempts = 0;
+            const maxAttempts = 30; // 最多等待30秒
+            
+            while (attempts < maxAttempts && !page.isClosed()) {
+                const url = page.url();
+                const title = await page.title();
+                
+                // 检查是否已经到达目标页面
+                if (url.includes('rewards.bing.com') || url.includes('bing.com/rewards')) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 已跳转到目标页面: ${url}`);
+                    break;
                 }
-            })();
-
-            await Promise.race([navigationPromise, intermediatePageHandler]);
+                
+                // 处理各种中间页面和弹窗
+                await this.dismissLoginMessages(page, email);
+                await this.handleVerifyEmailPage(page, email);
+                await this.handleOtherVerificationPages(page, email);
+                
+                // 检查页面是否包含成功登录的迹象
+                if (title.includes('Microsoft Rewards') || 
+                    title.includes('Bing Rewards') || 
+                    title.includes('Rewards') ||
+                    title.includes('Dashboard')) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 页面标题显示已登录: ${title}`);
+                    break;
+                }
+                
+                // 如果URL包含跳转参数，但页面标题是"即将完成"，说明需要处理辅助邮箱验证
+                if ((url.includes('route=') || url.includes('opid=') || url.includes('contextid=')) && 
+                    (title.includes('即将完成') || title.includes('Almost done'))) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到辅助邮箱验证页面，停止等待跳转`);
+                    break;
+                }
+                
+                // 如果URL包含跳转参数，说明正在跳转过程中
+                if (url.includes('route=') || url.includes('opid=') || url.includes('contextid=')) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 检测到跳转参数，等待跳转完成...`);
+                    await page.waitForTimeout(2000);
+                    attempts++;
+                    continue;
+                }
+                
+                // 如果页面标题不包含登录相关关键词，可能已经成功
+                if (!title.toLowerCase().includes('sign in') && 
+                    !title.toLowerCase().includes('login') && 
+                    !title.toLowerCase().includes('登录') &&
+                    !url.includes('login.live.com')) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 页面状态显示可能已登录: ${title}`);
+                    break;
+                }
+                
+                await this.bot.utils.wait(1000);
+                attempts++;
+            }
+            
+            // 最终检查：尝试访问rewards页面
+            if (!page.url().includes('rewards.bing.com')) {
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 尝试直接访问rewards页面...`);
+                try {
+                    await page.goto('https://rewards.bing.com', { 
+                        waitUntil: 'domcontentloaded', 
+                        timeout: 30000 
+                    });
+                    await page.waitForTimeout(3000);
+                } catch (gotoError) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 直接访问rewards页面失败: ${gotoError}`, 'warn');
+                }
+            }
 
             // 截图：登录成功后页面
             if (this.bot.config.snapshots?.login) {
                 await this.saveSnapshot(page, email, `post_login_snapshot_${Date.now()}.html`);
             }
-            await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 10000 });
-            this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功登录到奖励门户`);
+            
+            // 尝试等待rewards门户元素，但不强制要求
+            try {
+                await page.waitForSelector('html[data-role-name="RewardsPortal"]', { timeout: 5000 });
+                this.bot.log(this.bot.isMobile, '登录', `[${email}] 成功登录到奖励门户`);
+            } catch (selectorError) {
+                // 如果找不到rewards门户元素，检查页面是否包含rewards相关内容
+                const pageContent = await page.textContent('body');
+                if (pageContent && (pageContent.includes('Rewards') || pageContent.includes('Points') || pageContent.includes('积分'))) {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 页面包含rewards内容，登录成功`);
+                } else {
+                    this.bot.log(this.bot.isMobile, '登录', `[${email}] 未找到rewards门户元素，但继续流程`, 'warn');
+                }
+            }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.bot.log(this.bot.isMobile, '登录', `[${email}] 验证登录状态时超时或失败: ${errorMessage}`, 'error');

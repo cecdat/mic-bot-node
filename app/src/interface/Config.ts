@@ -97,6 +97,8 @@ export interface Config {
     parallel: boolean;
     // 并发账号数（从 service 端节点配置下发）
     clusters?: number;
+    // 搜索任务交叉执行开关（从 service 端节点配置下发）
+    search_cross_execution?: boolean;
     runOnZeroPoints: boolean;
     debug: boolean;
     saveFingerprint: ConfigSaveFingerprint;

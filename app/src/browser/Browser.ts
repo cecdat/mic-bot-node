@@ -29,6 +29,11 @@ class Browser {
                 '--allow-running-insecure-content',
                 '--disable-web-security',
                 '--disable-features=VizDisplayCompositor',
+                // 中文环境设置
+                '--lang=zh-CN',
+                '--accept-lang=zh-CN,zh,en-US,en',
+                '--disable-translate',
+                '--disable-ipc-flooding-protection',
                 // 移动端特殊参数：模拟Bing客户端
                 ...(this.bot.isMobile ? [
                     '--user-agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BingApp/1.0"',
@@ -75,7 +80,13 @@ class Browser {
         // 设置浏览器语言为中文
         // 使用 newContextOptions 来设置 locale 和录像选项
         const newContextOptions: any = {
-            locale: 'zh-CN'
+            locale: 'zh-CN',
+            timezoneId: 'Asia/Shanghai',
+            geolocation: { latitude: 39.9042, longitude: 116.4074 }, // 北京坐标
+            permissions: ['geolocation'],
+            extraHTTPHeaders: {
+                'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+            }
         };
 
         // 屏幕录像功能已禁用（根据配置）

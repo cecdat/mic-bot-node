@@ -18,29 +18,215 @@ import { Workers } from './functions/Workers';
 import Activities from './functions/Activities';
 import { LoginExceptionHandlerManager } from './handlers/LoginExceptionHandlerManager';
 import { PageExceptionDetector, PageExceptionResult } from './handlers/PageExceptionDetector';
-import { Account } from './interface/Account';
 import Axios from './util/Axios';
+import { Account } from './interface/Account';
 import axios from 'axios';
-import { Config } from './interface/Config'; 
+import { Config } from './interface/Config';
+import { displayVersion, getVersionManager } from './util/Version'; 
 
 // 添加全局变量跟踪任务运行状态
 let isTaskRunning = false;
 let shouldStopTask = false;
 let lastConfirmedCommand: string | null = null;
 let failedTaskManager: FailedTaskManager | null = null;
+let config: any = null; // 全局配置变量
 
 // 任务执行隔离机制
 let taskExecutionLock = false; // 防止重复执行任务
 let taskExecutionQueue: any[] = []; // 任务执行队列
+
+// 积分停滞检测相关
+interface AccountStagnationData {
+    email: string;
+    desktopStagnationCount: number;
+    mobileStagnationCount: number;
+    lastDesktopPoints: number;
+    lastMobilePoints: number;
+    desktopCompleted: boolean;
+    mobileCompleted: boolean;
+}
+
+let accountStagnationMap = new Map<string, AccountStagnationData>();
 
 /**
  * 初始化失败任务管理器
  */
 function initializeFailedTaskManager(sessionPath: string): void {
     if (!failedTaskManager) {
-        failedTaskManager = new FailedTaskManager(sessionPath, 3);
-        log('main', '失败任务管理', '失败任务管理器已初始化');
+        // 使用会话模式：重启后丢弃失败任务
+        failedTaskManager = new FailedTaskManager(sessionPath, 3, true);
+        log('main', '失败任务管理', '失败任务管理器已初始化（会话模式）');
     }
+}
+
+/**
+ * 初始化账户停滞检测数据
+ */
+function initializeAccountStagnationData(accounts: Account[]): void {
+    accountStagnationMap.clear();
+    for (const account of accounts) {
+        accountStagnationMap.set(account.email, {
+            email: account.email,
+            desktopStagnationCount: 0,
+            mobileStagnationCount: 0,
+            lastDesktopPoints: 0,
+            lastMobilePoints: 0,
+            desktopCompleted: false,
+            mobileCompleted: false
+        });
+    }
+    log('main', '停滞检测', `已初始化 ${accounts.length} 个账户的停滞检测数据`);
+}
+
+/**
+ * 分析页面异常情况（人机验证等）
+ */
+async function analyzePageForExceptions(page: any, account: Account, taskType: 'desktop' | 'mobile'): Promise<boolean> {
+    try {
+        const currentUrl = page.url();
+        const pageTitle = await page.title();
+        
+        log('main', '页面分析', `[${account.email}] 分析 ${taskType} 页面异常情况...`);
+        log('main', '页面分析', `[${account.email}] 当前URL: ${currentUrl}`);
+        log('main', '页面分析', `[${account.email}] 页面标题: ${pageTitle}`);
+        
+        // 检查是否有人机验证页面
+        const captchaIndicators = [
+            'captcha',
+            'verification',
+            'verify',
+            'challenge',
+            'robot',
+            'bot',
+            'security',
+            'suspicious',
+            'unusual',
+            'activity'
+        ];
+        
+        const titleLower = pageTitle.toLowerCase();
+        const urlLower = currentUrl.toLowerCase();
+        
+        for (const indicator of captchaIndicators) {
+            if (titleLower.includes(indicator) || urlLower.includes(indicator)) {
+                log('main', '页面分析', `[${account.email}] ⚠️ 检测到可能的验证页面: ${indicator}`, 'warn');
+                return true;
+            }
+        }
+        
+        // 检查页面内容中的验证相关元素
+        try {
+            const captchaElements = await page.$$('[class*="captcha"], [id*="captcha"], [class*="verification"], [id*="verification"]');
+            if (captchaElements.length > 0) {
+                log('main', '页面分析', `[${account.email}] ⚠️ 检测到验证相关元素`, 'warn');
+                return true;
+            }
+        } catch (error) {
+            // 忽略元素查找错误
+        }
+        
+        log('main', '页面分析', `[${account.email}] ✅ 页面分析正常，未发现异常`);
+        return false;
+        
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        log('main', '页面分析', `[${account.email}] 页面分析出错: ${errorMessage}`, 'warn');
+        return false;
+    }
+}
+
+/**
+ * 检查积分是否停滞
+ */
+function checkPointsStagnation(account: Account, taskType: 'desktop' | 'mobile', currentPoints: number): boolean {
+    const stagnationData = accountStagnationMap.get(account.email);
+    if (!stagnationData) {
+        return false;
+    }
+    
+    let lastPoints: number;
+    let stagnationCount: number;
+    
+    if (taskType === 'desktop') {
+        lastPoints = stagnationData.lastDesktopPoints;
+        stagnationCount = stagnationData.desktopStagnationCount;
+    } else {
+        lastPoints = stagnationData.lastMobilePoints;
+        stagnationCount = stagnationData.mobileStagnationCount;
+    }
+    
+    // 检查积分是否变化
+    if (currentPoints === lastPoints) {
+        stagnationCount++;
+        log('main', '停滞检测', `[${account.email}] ${taskType} 积分停滞: ${currentPoints} (连续 ${stagnationCount} 轮)`);
+        
+        if (taskType === 'desktop') {
+            stagnationData.desktopStagnationCount = stagnationCount;
+        } else {
+            stagnationData.mobileStagnationCount = stagnationCount;
+        }
+        
+        // 连续3轮停滞
+        if (stagnationCount >= 3) {
+            log('main', '停滞检测', `[${account.email}] ⚠️ ${taskType} 积分连续 ${stagnationCount} 轮停滞，需要切换任务类型`, 'warn');
+            return true;
+        }
+    } else {
+        // 积分有变化，重置停滞计数
+        if (taskType === 'desktop') {
+            stagnationData.desktopStagnationCount = 0;
+            stagnationData.lastDesktopPoints = currentPoints;
+        } else {
+            stagnationData.mobileStagnationCount = 0;
+            stagnationData.lastMobilePoints = currentPoints;
+        }
+        log('main', '停滞检测', `[${account.email}] ${taskType} 积分变化: ${lastPoints} → ${currentPoints}，重置停滞计数`);
+    }
+    
+    return false;
+}
+
+/**
+ * 获取账户应该执行的任务类型
+ */
+function getAccountTaskType(account: Account): 'desktop' | 'mobile' | 'skip' {
+    const stagnationData = accountStagnationMap.get(account.email);
+    if (!stagnationData) {
+        return 'desktop'; // 默认执行桌面端
+    }
+    
+    // 如果桌面端已完成，执行移动端
+    if (stagnationData.desktopCompleted && !stagnationData.mobileCompleted) {
+        log('main', '任务选择', `[${account.email}] 🔄 桌面端已完成，切换到移动端任务`);
+        return 'mobile';
+    }
+    
+    // 如果移动端已完成，执行桌面端
+    if (stagnationData.mobileCompleted && !stagnationData.desktopCompleted) {
+        log('main', '任务选择', `[${account.email}] 🔄 移动端已完成，切换到桌面端任务`);
+        return 'desktop';
+    }
+    
+    // 如果都已完成，跳过
+    if (stagnationData.desktopCompleted && stagnationData.mobileCompleted) {
+        log('main', '任务选择', `[${account.email}] ✅ 所有任务已完成，跳过`);
+        return 'skip';
+    }
+    
+    // 检查停滞情况，优先执行未停滞的任务类型
+    if (stagnationData.desktopStagnationCount >= 3 && !stagnationData.mobileCompleted) {
+        log('main', '任务选择', `[${account.email}] ⚠️ 桌面端停滞（${stagnationData.desktopStagnationCount}轮），切换到移动端任务`);
+        return 'mobile';
+    }
+    
+    if (stagnationData.mobileStagnationCount >= 3 && !stagnationData.desktopCompleted) {
+        log('main', '任务选择', `[${account.email}] ⚠️ 移动端停滞（${stagnationData.mobileStagnationCount}轮），切换到桌面端任务`);
+        return 'desktop';
+    }
+    
+    // 默认执行桌面端
+    log('main', '任务选择', `[${account.email}] 🖥️ 默认执行桌面端任务`);
+    return 'desktop';
 }
 
 /**
@@ -267,13 +453,15 @@ async function retryDesktopTask(task: any): Promise<boolean> {
 // 添加服务端状态跟踪
 let serverOffline = false;
 let lastServerErrorTime = 0;
+let lastRecoveryLogTime = 0; // 上次服务端恢复日志时间
 
 // 添加全局错误抑制机制
 let lastHeartbeatErrorTime = 0;
 let lastStatusSyncErrorTime = 0;
 let lastHeartbeatSuccessTime = 0;
-const ERROR_SUPPRESS_INTERVAL = 30000; // 30秒错误抑制间隔
-const HEARTBEAT_SUCCESS_INTERVAL = 300000; // 5分钟心跳成功日志间隔
+const ERROR_SUPPRESS_INTERVAL = 60000; // 60秒错误抑制间隔，减少日志频率
+const HEARTBEAT_SUCCESS_INTERVAL = 600000; // 10分钟心跳成功日志间隔，进一步减少日志
+const RECOVERY_LOG_INTERVAL = 300000; // 5分钟服务端恢复日志间隔
 
 // 添加精准状态跟踪
 let lastStatusUpdateTime = 0;
@@ -307,7 +495,7 @@ class NodeWebSocketClient {
     // 房间状态跟踪
     private isRoomJoined: boolean = false;
     private lastRoomJoinTime: number = 0;
-    private roomJoinCooldown: number = 300000; // 5分钟冷却期
+    private roomJoinCooldown: number = 30000; // 30秒冷却期，减少等待时间
 
     constructor(config: any) {
         this.config = config;
@@ -393,7 +581,18 @@ class NodeWebSocketClient {
             this.isReconnecting = false;
             this.processQueue(); // 处理队列中的消息
             
-            // 节点准备就绪通知将在checkInNode成功后自动处理
+            // 连接成功后立即尝试加入房间，不依赖checkInNode
+            setTimeout(() => {
+                log('main', 'WebSocket', '🏠 连接成功后立即尝试加入节点房间...');
+                this.joinNodeRoom();
+            }, 2000); // 2秒后尝试加入房间
+            
+            // 确保连接后立即检查任务
+            setTimeout(() => {
+                if (globalWebSocketTask) {
+                    log('main', 'WebSocket', '🔍 连接后检查到待处理任务，准备执行');
+                }
+            }, 1000);
         });
 
         this.socket.on('disconnect', () => {
@@ -420,6 +619,16 @@ class NodeWebSocketClient {
 
         this.socket.on('node_ready_confirmed', (data: any) => {
             log('main', 'WebSocket', `✅ 节点准备就绪确认: ${JSON.stringify(data)}`);
+        });
+
+        this.socket.on('room_joined', (data: any) => {
+            log('main', 'WebSocket', `🏠 成功加入节点房间: ${JSON.stringify(data)}`);
+            this.isRoomJoined = true;
+        });
+
+        this.socket.on('room_join_failed', (data: any) => {
+            log('main', 'WebSocket', `❌ 加入节点房间失败: ${JSON.stringify(data)}`, 'error');
+            this.isRoomJoined = false;
         });
 
         this.socket.on('new_task', (data: any) => {
@@ -456,6 +665,7 @@ class NodeWebSocketClient {
                 node_name: this.config.apiServer?.nodeName || 'unknown'
             };
         });
+
     }
 
     /**
@@ -538,16 +748,30 @@ class NodeWebSocketClient {
      */
     joinNodeRoom() {
         if (!this.shouldJoinRoom()) {
-            // 静默跳过，减少日志噪音
+            const timeSinceLastJoin = Date.now() - this.lastRoomJoinTime;
+            const remainingCooldown = this.roomJoinCooldown - timeSinceLastJoin;
+            log('main', 'WebSocket', `⏳ 房间加入冷却中，剩余 ${Math.ceil(remainingCooldown / 1000)} 秒`, 'warn');
             return;
         }
+        
+        if (!this.isConnected) {
+            log('main', 'WebSocket', '❌ WebSocket未连接，无法加入房间', 'warn');
+            return;
+        }
+        
+        if (!this.config.apiServer || !this.config.apiServer.nodeName) {
+            log('main', 'WebSocket', '❌ 节点名称未配置，无法加入房间', 'warn');
+            return;
+        }
+        
+        log('main', 'WebSocket', `🏠 正在加入节点房间: ${this.config.apiServer.nodeName}`);
         
         this.safeEmit('join_node_room', {
             node_name: this.config.apiServer.nodeName
         });
         this.isRoomJoined = true;
         this.lastRoomJoinTime = Date.now();
-        log('main', 'WebSocket', '📡 节点注册成功，已加入WebSocket房间');
+        log('main', 'WebSocket', '📡 节点房间加入请求已发送');
     }
 
     /**
@@ -710,7 +934,19 @@ async function executeTasks() {
     try {
         shouldStopTask = false; // 重置停止标志
 
-        const config = loadConfig();
+        // 重新加载远程配置，确保获取最新的交叉执行设置
+        try {
+            const nodeConfig = await loadNodeConfig();
+            if (nodeConfig) {
+                // 更新全局配置中的交叉执行设置
+                config.search_cross_execution = nodeConfig.search_cross_execution;
+                log('main', '主流程', `🔄 重新加载远程配置: search_cross_execution = ${nodeConfig.search_cross_execution}`);
+            }
+        } catch (error) {
+            log('main', '主流程', `⚠️ 重新加载远程配置失败: ${error}`, 'warn');
+        }
+
+        // 使用全局的 config 变量（已经包含远程配置）
         const accounts = await loadAccounts();
         if (accounts.length > 0) {
             // 初始化失败任务管理器
@@ -718,135 +954,23 @@ async function executeTasks() {
             
             await runHotSearchScript(accounts);
             
-            // 严格按账户顺序执行：每个账户先完成桌面端，再完成移动端
-            log('main', '主流程', '开始按账户顺序执行任务...');
+            // 检查是否启用搜索任务交叉执行
+            const searchCrossExecution = (config as any).search_cross_execution || false;
             
-            for (const account of accounts) {
-                // 检查是否需要停止
-                if (shouldStopTask) {
-                    log('main', '主流程', `检测到停止指令，终止账户 ${account.email} 的任务`, 'warn');
-                    break;
-                }
-                
-                log('main', '主流程', `开始处理账户: ${account.email}`);
-                
-                // 获取今日初始积分
-                const todayStr = new Util().getYYYYMMDD();
-                const dailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
-                let initialPointsToday = 0;
-                
-                if (dailyPointsData && dailyPointsData.date === todayStr) {
-                    initialPointsToday = dailyPointsData.initialPoints;
-                    log('main', '主流程', `[${account.email}] 使用已保存的今日初始积分: ${initialPointsToday}`);
-                } else {
-                    log('main', '主流程', `[${account.email}] 未找到今日初始积分记录，将在登录后获取当前积分作为初始值`);
-                }
-                
-                // 先执行桌面端任务
-                log('main', '主流程', `账户 ${account.email} 开始执行桌面端任务...`);
-                await runTasksForAccounts([account], config, 'desktop');
-                log('main', '主流程', `账户 ${account.email} 桌面端任务执行完成`);
-                
-                // 检查是否需要停止
-                if (shouldStopTask) {
-                    log('main', '主流程', `检测到停止指令，跳过账户 ${account.email} 的移动端任务`, 'warn');
-                    continue;
-                }
-                
-                // 再执行移动端任务
-                log('main', '主流程', `账户 ${account.email} 开始执行移动端任务...`);
-                await runTasksForAccounts([account], config, 'mobile');
-                log('main', '主流程', `账户 ${account.email} 移动端任务执行完成`);
-                
-                // 获取最终积分并上报
-                const finalDailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
-                if (finalDailyPointsData && finalDailyPointsData.date === todayStr) {
-                    // 优先使用移动端完成后的最终积分，如果没有则使用桌面端完成后的积分
-                    let finalPoints = finalDailyPointsData.mobileFinalPoints || finalDailyPointsData.desktopFinalPoints || finalDailyPointsData.initialPoints || 0;
-                    
-                    // 修复积分计算逻辑：即使初始积分为0，也要计算实际收益
-                    let dailyGain = 0;
-                    if (initialPointsToday > 0) {
-                        dailyGain = finalPoints - initialPointsToday;
-                    } else if (finalPoints > 0) {
-                        // 如果初始积分为0但最终积分大于0，说明有收益
-                        dailyGain = finalPoints;
-                    }
-                    
-                    log('main', '主流程', `[${account.email}] 积分统计 - 初始: ${initialPointsToday}, 最终: ${finalPoints}, 今日收益: ${dailyGain}`);
-                    
-                    // 验证积分数据合理性
-                    if (finalPoints < 0) {
-                        log('main', '主流程', `[${account.email}] ⚠️ 最终积分异常: ${finalPoints}，设置为0`, 'warn');
-                        finalPoints = 0;
-                    }
-                    
-                    if (dailyGain < 0) {
-                        log('main', '主流程', `[${account.email}] ⚠️ 今日收益异常: ${dailyGain}，设置为0`, 'warn');
-                        dailyGain = 0;
-                    }
-                    
-                    // 计算桌面端和移动端的实际收益
-                    let desktopGain = 0;
-                    let mobileGain = 0;
-                    
-                    // 修复收益计算逻辑
-                    if (finalDailyPointsData.desktopFinalPoints !== undefined) {
-                        if (finalDailyPointsData.initialPoints > 0) {
-                            // 如果有初始积分，计算差值
-                            desktopGain = Math.max(0, finalDailyPointsData.desktopFinalPoints - finalDailyPointsData.initialPoints);
-                        } else {
-                            // 如果初始积分为0，桌面端收益就是桌面端最终积分
-                            desktopGain = Math.max(0, finalDailyPointsData.desktopFinalPoints);
-                        }
-                    }
-                    
-                    if (finalDailyPointsData.mobileFinalPoints !== undefined && finalDailyPointsData.desktopFinalPoints !== undefined) {
-                        // 移动端收益 = 移动端最终积分 - 桌面端最终积分
-                        mobileGain = Math.max(0, finalDailyPointsData.mobileFinalPoints - finalDailyPointsData.desktopFinalPoints);
-                    }
-                    
-                    // 记录账户执行结果
-                    taskResult.accounts.push({
-                        email: account.email,
-                        points_gained: dailyGain,
-                        final_points: finalPoints,
-                        desktop_gain: desktopGain,
-                        mobile_gain: mobileGain
-                    });
-                    taskResult.total_points += dailyGain;
-                    
-                    log('main', '主流程', `[${account.email}] 收益统计 - 桌面端: ${desktopGain}, 移动端: ${mobileGain}`);
-                    log('main', '主流程', `[${account.email}] 积分数据详情 - 初始: ${finalDailyPointsData.initialPoints}, 桌面端最终: ${finalDailyPointsData.desktopFinalPoints}, 移动端最终: ${finalDailyPointsData.mobileFinalPoints}`);
-                    
-                    // 上报积分数据
-                    const bot = new MicrosoftRewardsBot();
-                    bot.config = config;
-                    bot.account = account;
-                    bot.axios = new Axios(account.proxy);
-                    
-                    await sendFinalUpdate(bot, {
-                        email: account.email,
-                        total_points: finalPoints,
-                        daily_gain: dailyGain,
-                        desktop_gain: desktopGain,
-                        mobile_gain: mobileGain
-                    });
-                } else {
-                    log('main', '主流程', `[${account.email}] ⚠️ 未找到今日积分数据，跳过上报`, 'warn');
-                }
-                
-                log('main', '主流程', `账户 ${account.email} 所有任务执行完成`);
-                
-                // 重试该账户的失败任务
-                try {
-                    const retryResult = await retryFailedTasks(account.email);
-                    if (retryResult.success > 0 || retryResult.failed > 0) {
-                        log('main', '主流程', `账户 ${account.email} 失败任务重试完成: 成功 ${retryResult.success} 个，失败 ${retryResult.failed} 个`);
-                    }
-                } catch (error) {
-                    log('main', '主流程', `账户 ${account.email} 失败任务重试异常: ${error}`, 'warn');
-                }
+            // 添加调试日志
+            log('main', '主流程', `🔍 调试: config.search_cross_execution = ${(config as any).search_cross_execution}`);
+            log('main', '主流程', `🔍 调试: searchCrossExecution = ${searchCrossExecution}`);
+            log('main', '主流程', `🔍 调试: typeof searchCrossExecution = ${typeof searchCrossExecution}`);
+            
+            // 判断是否应该使用交叉执行模式
+            const shouldUseCrossExecution = await shouldEnableCrossExecution(accounts, config, searchCrossExecution);
+            
+            if (shouldUseCrossExecution) {
+                log('main', '主流程', '🔄 启用搜索任务交叉执行模式');
+                await executeTasksWithCrossExecution(accounts, config, taskResult);
+            } else {
+                log('main', '主流程', '📋 使用传统顺序执行模式');
+                await executeTasksSequentially(accounts, config, taskResult);
             }
             
             // 更新任务结果
@@ -1228,18 +1352,19 @@ async function executeTaskIsolated(task: any) {
     
     // 设置执行锁
     taskExecutionLock = true;
-    isTaskRunning = true;
     
     try {
         log('main', '任务隔离', `🚀 开始执行隔离任务: ${task.task_id} (${task.command})`);
+        
+        // 设置任务运行状态并上报
+        isTaskRunning = true;
+        await updateActivityStatus('Running');
         
         // 尝试发送状态更新，但不依赖WebSocket连接
         if (wsClient && wsClient.connected) {
             wsClient.emitTaskStatusUpdate(task.task_id, 'executing', task.node_name);
         }
         // 静默处理WebSocket未连接的情况，减少日志输出
-        
-        await updateActivityStatus('Running');
         
         // 根据命令类型执行相应任务
         let taskResult = {
@@ -1262,6 +1387,14 @@ async function executeTaskIsolated(task: any) {
         // 静默处理WebSocket未连接的情况，减少日志输出
         
         log('main', '任务隔离', `✅ 隔离任务完成: ${task.task_id}`);
+        
+        // 立即处理队列中的下一个任务
+        if (taskExecutionQueue.length > 0) {
+            const nextTask = taskExecutionQueue.shift();
+            log('main', '任务隔离', `🔄 处理队列中的下一个任务: ${nextTask.task_id}`);
+            // 递归处理下一个任务
+            setTimeout(() => executeTaskIsolated(nextTask), 1000);
+        }
         
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1423,11 +1556,20 @@ async function checkInNode() {
             payload.heartbeat_timeout = utils.stringToMs(apiConfig.heartbeatTimeout) / 1000;
         }
 
-        // 抑制频繁的心跳发送日志
+        // 抑制频繁的心跳发送日志 - 只在待机状态下进一步减少日志
         const now = Date.now();
         if (now - lastHeartbeatSuccessTime > HEARTBEAT_SUCCESS_INTERVAL) {
-            log('main', '节点管理', `📡 向中心服务器签到/发送心跳: ${apiConfig.nodeName}`);
-            log('main', '节点管理', `🌐 服务地址: ${checkinUrl.toString()}`);
+            // 在待机状态下，进一步减少心跳日志
+            if (!isTaskRunning) {
+                // 待机状态下，每20分钟才输出一次心跳日志
+                if (now - lastHeartbeatSuccessTime > 1200000) {
+                    log('main', '节点管理', `📡 节点待机中，心跳正常: ${apiConfig.nodeName}`);
+                }
+            } else {
+                // 任务执行状态下，正常输出心跳日志
+                log('main', '节点管理', `📡 向中心服务器签到/发送心跳: ${apiConfig.nodeName}`);
+                log('main', '节点管理', `🌐 服务地址: ${checkinUrl.toString()}`);
+            }
         }
         
         await axios.post(checkinUrl.toString(), payload, {
@@ -1435,15 +1577,28 @@ async function checkInNode() {
             timeout: 30000 // 30秒超时
         });
         
-        // 节点注册成功后，使用新的房间加入逻辑
+        // 节点注册成功后，确保WebSocket房间已加入（作为备用机制）
         if (wsClient && wsClient.connected) {
-            wsClient.joinNodeRoom();
+            // 检查是否已经加入房间，如果没有则尝试加入
+            if (!wsClient.isRoomJoined) {
+                log('main', '节点管理', '🏠 节点注册成功，确保WebSocket房间已加入...');
+                wsClient.joinNodeRoom();
+            } else {
+                log('main', '节点管理', '✅ WebSocket房间已加入，无需重复加入');
+            }
         }
         
-        // 检查服务端是否从离线状态恢复
+        // 检查服务端是否从离线状态恢复 - 抑制重复的恢复日志
         if (serverOffline) {
             const offlineDuration = Math.round((Date.now() - lastServerErrorTime) / 1000);
-            log('main', '节点管理', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
+            const now = Date.now();
+            
+            // 抑制频繁的恢复日志，每5分钟最多输出一次
+            if (now - lastRecoveryLogTime > RECOVERY_LOG_INTERVAL) {
+                log('main', '节点管理', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
+                lastRecoveryLogTime = now;
+            }
+            
             serverOffline = false;
             lastServerErrorTime = 0;
             lastHeartbeatErrorTime = 0; // 重置错误时间
@@ -1709,7 +1864,27 @@ async function runHotSearchScript(accounts: Account[]) {
         
         const baseDir = __dirname;
         const tempAccountsPath = path.join(baseDir, 'accounts.temp.json');
-        const configPath = path.join(baseDir, 'config.json');
+        
+        // 使用正确的配置文件路径
+        let configPath: string;
+        try {
+            const config = loadConfig();
+            // 尝试多个可能的配置文件路径
+            const possiblePaths = [
+                path.join('/app', 'config.json'),            // 容器环境
+                path.join(process.cwd(), 'config.json'),     // 当前工作目录
+                path.join(baseDir, 'config.json'),           // dist目录
+                'config.json'                                 // 相对路径
+            ];
+            
+            configPath = possiblePaths.find(p => fs.existsSync(p)) || possiblePaths[0];
+            log('main', '热搜脚本', `使用配置文件路径: ${configPath}`);
+        } catch (error) {
+            // 如果loadConfig失败，使用默认路径
+            configPath = path.join('/app', 'config.json');
+            log('main', '热搜脚本', `配置文件加载失败，使用默认路径: ${configPath}`, 'warn');
+        }
+        
         const outputDir = path.join(baseDir, 'search_terms');
         
         // 确保输出目录存在
@@ -2095,7 +2270,7 @@ export class MicrosoftRewardsBot {
             await saveDailyPoints(this.config.sessionPath, account.email, {
                 date: todayStr,
                 initialPoints: mobileInitialPoints, // 使用桌面端完成后的积分作为初始值
-                desktopFinalPoints: mobileInitialPoints, // 桌面端完成后的积分
+                desktopFinalPoints: mobileInitialPoints, // 桌面端完成后的积分（mobileInitialPoints就是桌面端完成后的积分）
                 mobileFinalPoints: finalPoints // 新增：移动端完成后的最终积分
             });
             log(true, '主流程', `[${account.email}] 已保存移动端完成后的最终积分: ${finalPoints}`);
@@ -2460,18 +2635,23 @@ async function main() {
         });
 
         // 加载配置
-        let config = loadConfig();
+        config = loadConfig();
         
         // 检测进程类型（主进程还是子进程）
         const isMainProcess = !process.env.ACCOUNT && !process.env.TASK_TYPE;
         
         // 只在主进程中显示完整的启动信息
         if (isMainProcess) {
+            // 显示版本信息
+            displayVersion();
+            
             log('main', '启动', '🚀 Mic-Bot Node 正在启动...');
             log('main', '启动', `📋 节点名称: ${config.apiServer?.nodeName || '未配置'}`);
             log('main', '启动', `🌐 服务地址: ${config.apiServer?.updateUrl || '未配置'}`);
             log('main', '启动', `🔑 API Token: ${config.apiServer?.token ? '已配置' : '未配置'}`);
-            log('main', '启动', `💓 心跳间隔: ${config.apiServer?.heartbeatInterval || '5m'}`);
+            // 显示实际的心跳间隔配置
+            const heartbeatInterval = config.apiServer?.heartbeatInterval || '5m';
+            log('main', '启动', `💓 心跳间隔: ${heartbeatInterval}`);
         }
 
         // 启动日志服务器
@@ -2516,12 +2696,14 @@ async function main() {
                     ...config,
                     searchSettings: remoteSearchSettings,
                     clusters: (nodeConfig as any).clusters,
+                    search_cross_execution: nodeConfig.search_cross_execution,
                 };
 
                 if (isMainProcess) {
                     log('main', '启动', '✅ 已成功加载远程节点配置');
                     log('main', '启动', `⚙️ 服务端并发配置: ${(nodeConfig as any).clusters || '未配置'}`);
                     log('main', '启动', `🔍 搜索延迟: ${nodeConfig.search_delay_min || '2s'} - ${nodeConfig.search_delay_max || '5s'}`);
+                    log('main', '启动', `🔄 交叉执行配置: ${nodeConfig.search_cross_execution ? '已启用' : '未启用'}`);
                 }
             }
         } catch (error) {
@@ -2583,7 +2765,7 @@ async function main() {
         let consecutiveErrors = 0;
         const maxConsecutiveErrors = 5; // 最大连续错误次数
         let lastLoopTime = Date.now();
-        const maxLoopInterval = 300000; // 5分钟最大循环间隔
+        const maxLoopInterval = 600000; // 10分钟最大循环间隔
         
         // 启动主循环监控
         const loopMonitor = setInterval(() => {
@@ -2643,17 +2825,36 @@ async function main() {
                         taskExecutionQueue.push(task);
                     } else {
                         // 使用隔离执行函数，确保任务执行不受WebSocket连接状态影响
+                        log('main', '主流程', `🚀 立即执行WebSocket任务: ${task.task_id} (${task.command})`);
                         executeTaskIsolated(task);
                     }
                 }
                 
-                // 如果使用WebSocket调度，跳过轮询
+                // 如果使用WebSocket调度且连接正常，跳过轮询
                 if (useWebSocketScheduling && wsClient && wsClient.connected) {
-                    await new Promise(resolve => setTimeout(resolve, 5000)); // 等待5秒
+                    // 检查是否有待处理的WebSocket任务
+                    if (globalWebSocketTask) {
+                        const task = globalWebSocketTask;
+                        globalWebSocketTask = null; // 清除任务
+                        log('main', '主流程', `📋 收到WebSocket任务: ${task.task_id} (${task.command})`);
+                        if (isTaskRunning) {
+                            log('main', '主流程', `⚠️ 有任务正在执行中，将WebSocket任务加入队列: ${task.task_id}`, 'warn');
+                            taskExecutionQueue.push(task);
+                        } else {
+                            log('main', '主流程', `🚀 立即执行WebSocket任务: ${task.task_id} (${task.command})`);
+                            executeTaskIsolated(task);
+                        }
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // 减少等待时间到1秒，提高响应性
                     continue;
                 }
                 // 重置连续错误计数
                 consecutiveErrors = 0;
+                
+                // 如果之前有连续错误，记录恢复信息
+                if (consecutiveErrors === 0) {
+                    // 这里不需要额外日志，因为consecutiveErrors已经重置了
+                }
                 // [修复] 移除错误的状态健康检查逻辑
                 // 原来的逻辑会错误地重置任务状态，导致任务执行时显示Idle
                 // 任务状态应该只在主循环的finally块中重置
@@ -2664,15 +2865,22 @@ async function main() {
 
                 const response = await axios.get(commandUrl.toString(), {
                     headers: { 'Authorization': `Bearer ${config.apiServer.token}` },
-                    timeout: 60000
+                    timeout: 120000  // 增加超时时间到120秒，减少误报
                 });
 
                 const command = response.data.command;
 
-                // 检查服务端是否从离线状态恢复
+                // 检查服务端是否从离线状态恢复 - 抑制重复的恢复日志
                 if (serverOffline) {
                     const offlineDuration = Math.round((Date.now() - lastServerErrorTime) / 1000);
-                    log('main', '主流程', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
+                    const now = Date.now();
+                    
+                    // 抑制频繁的恢复日志，每5分钟最多输出一次
+                    if (now - lastRecoveryLogTime > RECOVERY_LOG_INTERVAL) {
+                        log('main', '主流程', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
+                        lastRecoveryLogTime = now;
+                    }
+                    
                     serverOffline = false;
                     lastServerErrorTime = 0;
                 }
@@ -2769,7 +2977,17 @@ async function main() {
                     await confirmCommandToServer('UPGRADE');
                     log('main', '主流程', '升级命令处理完成', 'warn');
                 } else if (command === 'RESTART_SERVICE') {
-                    log('main', '主流程', '收到 [重启服务] 指令，准备重启...', 'warn');
+                    log('main', '主流程', '🔄 收到 [重启服务] 指令，准备重启...', 'warn');
+                    
+                    // 记录重启信息
+                    const restartInfo = {
+                        restart_time: new Date().toISOString(),
+                        restart_reason: 'manual_restart',
+                        node_name: config.apiServer?.nodeName || 'unknown',
+                        current_tasks: isTaskRunning ? 'running' : 'idle'
+                    };
+                    log('main', '主流程', `📋 重启信息: ${JSON.stringify(restartInfo)}`, 'log');
+                    
                     // 立即更新活动状态为Idle，停止当前任务
                     shouldStopTask = true;
                     await updateActivityStatus('Idle');
@@ -2778,9 +2996,20 @@ async function main() {
                     // 向服务端确认命令已执行
                     await confirmCommandToServer('RESTART_SERVICE');
                     
-                    log('main', '主流程', '服务将在3秒后重启...', 'warn');
+                    // 发送重启状态到WebSocket
+                    if (wsClient && wsClient.connected) {
+                        wsClient.safeEmit('restart_status', {
+                            node_id: config.apiServer?.nodeName || 'unknown',
+                            status: 'restarting',
+                            message: '节点正在重启服务',
+                            restart_time: restartInfo.restart_time
+                        });
+                    }
+                    
+                    log('main', '主流程', '⏰ 服务将在3秒后重启...', 'warn');
                     setTimeout(() => {
-                        log('main', '主流程', '正在重启服务...', 'warn');
+                        log('main', '主流程', '🚀 正在重启服务...', 'warn');
+                        log('main', '主流程', '👋 再见！', 'log');
                         process.exit(0); // 退出进程，让容器重启
                     }, 3000);
                 } else if (command === null) {
@@ -2798,7 +3027,14 @@ async function main() {
                 if (axios.isAxiosError(error)) {
                     if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
                         errorMessage = '长轮询超时，正在发起下一次请求...';
-                        retryDelay = 5000; // 超时错误快速重试
+                        retryDelay = 10000; // 超时错误重试间隔增加到10秒
+                        
+                        // 进一步抑制超时错误日志，减少待机状态下的日志噪音
+                        if (consecutiveErrors % 20 === 1) { // 每20次超时才记录一次，进一步减少日志噪音
+                            log('main', '主流程', `长轮询超时 (${consecutiveErrors}次)，网络可能较慢`, 'warn');
+                        } else if (consecutiveErrors % 100 === 1) { // 每100次超时记录一次详细信息
+                            log('main', '主流程', `长轮询持续超时 (${consecutiveErrors}次)，建议检查网络连接`, 'warn');
+                        }
                     } else if (error.response) {
                         const status = error.response.status;
                         errorMessage = `服务器错误 (${status}): ${JSON.stringify(error.response.data)}`;
@@ -2847,8 +3083,18 @@ async function main() {
                 
                 // 抑制重复的主循环错误日志
                 const errorTime = Date.now();
-                if (errorTime - lastServerErrorTime > ERROR_SUPPRESS_INTERVAL) {
+                const isTimeoutError = axios.isAxiosError(error) && (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT');
+                
+                // 对于超时错误，使用更宽松的抑制策略，进一步减少待机状态下的日志
+                if (isTimeoutError) {
+                    // 超时错误每10次才记录一次，或者距离上次记录超过5分钟
+                    if (consecutiveErrors % 10 === 1 || errorTime - lastServerErrorTime > 300000) {
+                        log('main', '主流程', `主循环出错 (${consecutiveErrors}/${maxConsecutiveErrors}): ${errorMessage}`, 'warn');
+                        lastServerErrorTime = errorTime;
+                    }
+                } else if (errorTime - lastServerErrorTime > ERROR_SUPPRESS_INTERVAL) {
                     log('main', '主流程', `主循环出错 (${consecutiveErrors}/${maxConsecutiveErrors}): ${errorMessage}`, 'warn');
+                    lastServerErrorTime = errorTime;
                 }
                 
                 // 检查连续错误次数
@@ -2890,8 +3136,14 @@ async function main() {
                     }
                 }
                 
-                // 等待指定时间后重试
-                log('main', '主流程', `等待${retryDelay/1000}秒后重试...`);
+                // 等待指定时间后重试 - 抑制频繁的等待日志
+                const waitTime = retryDelay/1000;
+                const isTimeoutErrorForWait = axios.isAxiosError(error) && (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT');
+                
+                // 只在非超时错误或长时间等待时才输出等待日志
+                if (!isTimeoutErrorForWait || waitTime >= 30) {
+                    log('main', '主流程', `等待${waitTime}秒后重试...`);
+                }
                 await utils.wait(retryDelay);
             }
         }
@@ -2899,6 +3151,1270 @@ async function main() {
         const errorMessage = error instanceof Error ? error.message : String(error);
         log('main', '主流程-致命错误', `运行机器人时发生致命错误: ${errorMessage}`, 'error');
         process.exit(1);
+    }
+}
+
+/**
+ * 传统顺序执行模式：每个账户先完成桌面端，再完成移动端
+ */
+async function executeTasksSequentially(accounts: Account[], config: Config, taskResult: any) {
+    log('main', '主流程', '开始按账户顺序执行任务...');
+    
+    for (const account of accounts) {
+        // 检查是否需要停止
+        if (shouldStopTask) {
+            log('main', '主流程', `检测到停止指令，终止账户 ${account.email} 的任务`, 'warn');
+            break;
+        }
+        
+        log('main', '主流程', `开始处理账户: ${account.email}`);
+        
+        // 获取今日初始积分
+        const todayStr = new Util().getYYYYMMDD();
+        const dailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
+        let initialPointsToday = 0;
+        
+        if (dailyPointsData && dailyPointsData.date === todayStr) {
+            initialPointsToday = dailyPointsData.initialPoints;
+            log('main', '主流程', `[${account.email}] 使用已保存的今日初始积分: ${initialPointsToday}`);
+        } else {
+            log('main', '主流程', `[${account.email}] 未找到今日初始积分记录，将在登录后获取当前积分作为初始值`);
+        }
+        
+        // 先执行桌面端任务
+        log('main', '主流程', `账户 ${account.email} 开始执行桌面端任务...`);
+        await runTasksForAccounts([account], config, 'desktop');
+        log('main', '主流程', `账户 ${account.email} 桌面端任务执行完成`);
+        
+        // 检查是否需要停止
+        if (shouldStopTask) {
+            log('main', '主流程', `检测到停止指令，跳过账户 ${account.email} 的移动端任务`, 'warn');
+            continue;
+        }
+        
+        // 再执行移动端任务
+        log('main', '主流程', `账户 ${account.email} 开始执行移动端任务...`);
+        await runTasksForAccounts([account], config, 'mobile');
+        log('main', '主流程', `账户 ${account.email} 移动端任务执行完成`);
+        
+        // 处理积分统计和上报
+        const accountResult = await processAccountPoints(account, config, todayStr, initialPointsToday);
+        if (accountResult) {
+            taskResult.accounts.push(accountResult);
+            taskResult.total_points += accountResult.points_gained;
+        }
+        
+        log('main', '主流程', `账户 ${account.email} 所有任务执行完成`);
+        
+        // 重试该账户的失败任务
+        await retryAccountFailedTasks(account.email);
+    }
+}
+
+/**
+ * 交叉执行模式：按账户轮询执行搜索任务
+ */
+async function executeTasksWithCrossExecution(accounts: Account[], config: Config, taskResult: any) {
+    log('main', '主流程', '开始分阶段交叉执行模式：先完成移动端签到阅读，再进行搜索任务交叉运行...');
+    
+    // 初始化所有账户的积分数据和停滞检测数据
+    const accountPointsData = new Map<string, {initialPoints: number, todayStr: string}>();
+    initializeAccountStagnationData(accounts);
+    
+    for (const account of accounts) {
+        const todayStr = new Util().getYYYYMMDD();
+        const dailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
+        let initialPointsToday = 0;
+        
+        if (dailyPointsData && dailyPointsData.date === todayStr) {
+            initialPointsToday = dailyPointsData.initialPoints;
+        }
+        
+        accountPointsData.set(account.email, {
+            initialPoints: initialPointsToday,
+            todayStr: todayStr
+        });
+        
+        log('main', '主流程', `[${account.email}] 初始化积分: ${initialPointsToday}`);
+    }
+    
+    // 第一阶段：所有账户完成移动端签到和阅读任务
+    log('main', '主流程', '📱 第一阶段：开始执行所有账户的移动端签到和阅读任务...');
+    await executeAllAccountsMobileCheckInAndReadTasks(accounts, config, accountPointsData);
+    
+    // 第二阶段：搜索任务交叉运行
+    log('main', '主流程', '🔄 第二阶段：开始搜索任务交叉运行...');
+    await executeSmartCrossSearchTasks(accounts, config, accountPointsData);
+    
+    // 处理所有账户的积分统计和上报
+    for (const account of accounts) {
+        const pointsData = accountPointsData.get(account.email);
+        if (pointsData) {
+            const accountResult = await processAccountPoints(account, config, pointsData.todayStr, pointsData.initialPoints);
+            if (accountResult) {
+                taskResult.accounts.push(accountResult);
+                taskResult.total_points += accountResult.points_gained;
+            }
+        }
+    }
+    
+    // 所有任务完成后，统一重试失败任务
+    log('main', '主流程', '🔄 开始重试所有失败任务...');
+    for (const account of accounts) {
+        await retryAccountFailedTasks(account.email);
+    }
+    log('main', '主流程', '✅ 失败任务重试完成');
+    
+    log('main', '主流程', '智能交叉执行模式完成');
+}
+
+/**
+ * 第一阶段：执行所有账户的移动端签到和阅读任务
+ */
+async function executeAllAccountsMobileCheckInAndReadTasks(
+    accounts: Account[], 
+    config: Config, 
+    accountPointsData: Map<string, {initialPoints: number, todayStr: string}>
+) {
+    log('main', '主流程', `📱 开始执行 ${accounts.length} 个账户的移动端签到和阅读任务`);
+    
+    for (const account of accounts) {
+        if (shouldStopTask) {
+            log('main', '主流程', `检测到停止指令，终止移动端签到阅读任务`, 'warn');
+            return;
+        }
+        
+        log('main', '主流程', `[${account.email}] 开始执行移动端签到和阅读任务`);
+        
+        // 创建浏览器实例
+        const bot = new MicrosoftRewardsBot();
+        bot.account = account;
+        bot.axios = new Axios(account.proxy);
+        bot.isMobile = true;
+        
+        let browser: any = null;
+        let context: any = null;
+        
+        try {
+            browser = await bot.browserFactory.launchBrowser(account);
+            
+            try {
+                context = await bot.browserFactory.createContext(browser, account);
+                const page = await context.newPage();
+                
+                try {
+                    // 激活会话状态
+                    log('main', '主流程', `[${account.email}] 激活会话状态...`);
+                    await page.goto('https://rewards.bing.com', { waitUntil: 'domcontentloaded' });
+                    await page.waitForTimeout(2000);
+                    
+                    // 执行登录流程
+                    try {
+                        await bot.login.login(page, account.email, account.password);
+                        log('main', '主流程', `[${account.email}] 登录流程完成`);
+                    } catch (loginError) {
+                        const errorMessage = loginError instanceof Error ? loginError.message : String(loginError);
+                        log('main', '主流程', `[${account.email}] 登录失败: ${errorMessage}，跳过移动端签到阅读任务`, 'warn');
+                        continue;
+                    }
+                    
+                    // 获取初始数据
+                    const initialData = await bot.browser.func.getDashboardData(page);
+                    
+                    // 获取移动端访问令牌
+                    let accessToken: string | null = null;
+                    try {
+                        const tokenPage = await context.newPage();
+                        try { 
+                            accessToken = await bot.login.getMobileAccessToken(tokenPage, account.email); 
+                            log('main', '主流程', `[${account.email}] 成功获取移动端访问令牌`);
+                        } catch (tokenError) {
+                            const errorMessage = tokenError instanceof Error ? tokenError.message : String(tokenError);
+                            log('main', '主流程', `[${account.email}] 获取移动端访问令牌失败: ${errorMessage}`, 'warn');
+                        } finally { 
+                            await tokenPage.close(); 
+                        }
+                    } catch (error) {
+                        const errorMessage = error instanceof Error ? error.message : String(error);
+                        log('main', '主流程', `[${account.email}] 移动端访问令牌获取过程出错: ${errorMessage}`, 'warn');
+                    }
+                    
+                    // 执行移动端每日签到任务
+                    if (accessToken && bot.config.workers.doDailyCheckIn) {
+                        try {
+                            log('main', '主流程', `[${account.email}] 开始执行移动端每日签到任务`);
+                            const checkInResult = await bot.activities.doDailyCheckIn(accessToken, initialData);
+                            log('main', '主流程', `[${account.email}] 移动端每日签到任务执行完成: ${JSON.stringify(checkInResult)}`);
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            log('main', '主流程', `[${account.email}] 每日签到任务执行失败: ${errorMessage}`, 'warn');
+                        }
+                    } else if (!accessToken && bot.config.workers.doDailyCheckIn) {
+                        log('main', '主流程', `[${account.email}] 跳过移动端每日签到任务（访问令牌获取失败）`, 'warn');
+                    }
+                    
+                    // 执行移动端阅读赚积分任务
+                    if (accessToken && bot.config.workers.doReadToEarn) {
+                        try {
+                            log('main', '主流程', `[${account.email}] 开始执行移动端阅读赚积分任务`);
+                            await bot.activities.doReadToEarn(accessToken, initialData);
+                            log('main', '主流程', `[${account.email}] 移动端阅读赚积分任务执行完成`);
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            log('main', '主流程', `[${account.email}] 阅读赚积分任务执行失败: ${errorMessage}`, 'warn');
+                        }
+                    } else if (!accessToken && bot.config.workers.doReadToEarn) {
+                        log('main', '主流程', `[${account.email}] 跳过移动端阅读赚积分任务（访问令牌获取失败）`, 'warn');
+                    }
+                    
+                    log('main', '主流程', `[${account.email}] 移动端签到和阅读任务执行完成`);
+                    
+                } finally {
+                    await page.close();
+                }
+            } finally {
+                if (context) {
+                    await context.close();
+                }
+            }
+        } finally {
+            if (browser) {
+                await browser.close();
+            }
+        }
+        
+        // 账户间延迟
+        if (!shouldStopTask) {
+            await new Promise(resolve => setTimeout(resolve, 3000)); // 3秒延迟
+        }
+    }
+    
+    log('main', '主流程', '📱 所有账户的移动端签到和阅读任务执行完成');
+}
+
+/**
+ * 智能交叉执行搜索任务：根据积分变化和完成状态动态切换任务类型
+ */
+async function executeSmartCrossSearchTasks(
+    accounts: Account[], 
+    config: Config, 
+    accountPointsData: Map<string, {initialPoints: number, todayStr: string}>
+) {
+    const maxRounds = 20; // 增加最大轮数，因为现在需要处理更复杂的切换逻辑
+    let currentRound = 0;
+    let allCompleted = false;
+    
+    // 动态账户列表，会随着任务完成而减少
+    let activeAccounts = [...accounts];
+    
+    while (currentRound < maxRounds && !allCompleted && !shouldStopTask && activeAccounts.length > 0) {
+        currentRound++;
+        log('main', '主流程', `🔄 开始第 ${currentRound} 轮智能交叉执行`);
+        log('main', '主流程', `📊 当前活跃账户数量: ${activeAccounts.length}`);
+        
+        allCompleted = true;
+        const completedAccounts: Account[] = []; // 本轮完成的账户
+        
+        for (const account of activeAccounts) {
+            if (shouldStopTask) {
+                log('main', '主流程', `检测到停止指令，终止智能交叉执行`, 'warn');
+                return;
+            }
+            
+            // 获取账户应该执行的任务类型
+            const taskType = getAccountTaskType(account);
+            
+            if (taskType === 'skip') {
+                log('main', '主流程', `[${account.email}] 所有任务已完成，跳过`);
+                completedAccounts.push(account);
+                continue;
+            }
+            
+            log('main', '主流程', `[${account.email}] 开始第 ${currentRound} 轮 ${taskType} 任务`);
+            
+            try {
+                // 执行单个账户的一轮搜索任务
+                const isTaskCompleted = await runSingleAccountSearchTaskWithStagnationCheck(
+                    account, 
+                    config, 
+                    taskType, 
+                    accountPointsData, 
+                    currentRound === 1 // 第一轮进行完整登录检查
+                );
+                
+                if (isTaskCompleted) {
+                    // 标记该任务类型为已完成
+                    const stagnationData = accountStagnationMap.get(account.email);
+                    if (stagnationData) {
+                        if (taskType === 'desktop') {
+                            stagnationData.desktopCompleted = true;
+                        } else {
+                            stagnationData.mobileCompleted = true;
+                        }
+                        
+                        // 检查是否所有任务都已完成
+                        if (stagnationData.desktopCompleted && stagnationData.mobileCompleted) {
+                            log('main', '主流程', `[${account.email}] 🎉 所有任务已完成（桌面端+移动端），从活跃列表中移除`);
+                            completedAccounts.push(account);
+                        } else {
+                            if (taskType === 'desktop' && stagnationData.desktopCompleted) {
+                                log('main', '主流程', `[${account.email}] ✅ 桌面端任务已完成，下一轮将执行移动端任务`);
+                            } else if (taskType === 'mobile' && stagnationData.mobileCompleted) {
+                                log('main', '主流程', `[${account.email}] ✅ 移动端任务已完成，下一轮将执行桌面端任务`);
+                            } else {
+                                log('main', '主流程', `[${account.email}] ✅ ${taskType} 任务已完成，继续参与下一轮`);
+                            }
+                            allCompleted = false;
+                        }
+                    }
+                } else {
+                    log('main', '主流程', `[${account.email}] 第 ${currentRound} 轮 ${taskType} 任务完成，继续参与下一轮`);
+                    allCompleted = false; // 有未完成的任务，需要继续下一轮
+                }
+            } catch (error) {
+                log('main', '主流程', `[${account.email}] 第 ${currentRound} 轮 ${taskType} 任务失败: ${error}`, 'error');
+                allCompleted = false; // 有失败的任务，需要继续下一轮
+            }
+            
+            // 添加轮次间延迟
+            if (!shouldStopTask) {
+                await new Promise(resolve => setTimeout(resolve, 2000)); // 2秒延迟
+            }
+        }
+        
+        // 从活跃账户列表中移除已完成的账户
+        activeAccounts = activeAccounts.filter(account => !completedAccounts.includes(account));
+        
+        if (!allCompleted) {
+            log('main', '主流程', `第 ${currentRound} 轮智能交叉执行完成，有未完成任务，继续下一轮`);
+        } else {
+            log('main', '主流程', `第 ${currentRound} 轮智能交叉执行完成，所有任务成功`);
+        }
+        
+        // 如果所有账户都完成了任务，退出循环
+        if (activeAccounts.length === 0) {
+            log('main', '主流程', `🎉 所有账户的所有任务都已完成，退出智能交叉执行`);
+            break;
+        }
+    }
+    
+    if (currentRound >= maxRounds) {
+        log('main', '主流程', `⚠️ 智能交叉执行达到最大轮数限制 (${maxRounds})，停止执行`, 'warn');
+    }
+}
+
+/**
+ * 执行单个账户的一轮搜索任务（带停滞检测）
+ */
+async function runSingleAccountSearchTaskWithStagnationCheck(
+    account: Account, 
+    config: Config, 
+    taskType: 'desktop' | 'mobile',
+    accountPointsData: Map<string, {initialPoints: number, todayStr: string}>,
+    shouldCheckLogin: boolean = true
+): Promise<boolean> {
+    log('main', '主流程', `[${account.email}] 开始执行 ${taskType} 搜索任务（带停滞检测）`);
+    
+    try {
+        // 创建浏览器实例
+        const bot = new MicrosoftRewardsBot();
+        bot.account = account;
+        bot.axios = new Axios(account.proxy); // 初始化axios实例
+        
+        // 根据任务类型设置移动端模式
+        if (taskType === 'mobile') {
+            bot.isMobile = true;
+            log('main', '主流程', `[${account.email}] 设置为移动端模式`);
+        } else {
+            bot.isMobile = false;
+            log('main', '主流程', `[${account.email}] 设置为桌面端模式`);
+        }
+        
+        const browser = await bot.browserFactory.launchBrowser(account);
+        
+        try {
+            const context = await bot.browserFactory.createContext(browser, account);
+            const page = await context.newPage();
+            
+            try {
+                // 激活会话状态
+                log('main', '主流程', `[${account.email}] 激活会话状态...`);
+                await page.goto('https://rewards.bing.com', { waitUntil: 'domcontentloaded' });
+                await page.waitForTimeout(2000);
+                
+                // 根据参数决定是否进行登录检查
+                if (shouldCheckLogin) {
+                    log('main', '主流程', `[${account.email}] 执行完整登录流程（包含登录检查）`);
+                    await bot.login.login(page, account.email, account.password);
+                } else {
+                    log('main', '主流程', `[${account.email}] 跳过登录检查，直接使用现有会话`);
+                    // 直接调用 login 方法，它会内部处理登录状态检查
+                    // 如果已经登录，login 方法会快速返回
+                    await bot.login.login(page, account.email, account.password);
+                }
+                
+                // 登录完成后获取执行前的积分状态
+                let beforePoints = 0;
+                try {
+                    const beforeDashboardData = await bot.browser.func.getDashboardData(page);
+                    if (taskType === 'desktop') {
+                        beforePoints = beforeDashboardData.userStatus.counters.pcSearch?.[0]?.pointProgress || 0;
+                    } else {
+                        beforePoints = beforeDashboardData.userStatus.counters.mobileSearch?.[0]?.pointProgress || 0;
+                    }
+                    log('main', '主流程', `[${account.email}] 执行前 ${taskType} 积分: ${beforePoints}`);
+                } catch (error) {
+                    log('main', '主流程', `[${account.email}] 获取执行前积分失败: ${error}`, 'warn');
+                    beforePoints = 0;
+                }
+                
+                // 跳转到 Bing 搜索页面
+                log('main', '主流程', `[${account.email}] 跳转到 Bing 搜索页面...`);
+                await page.goto('https://www.bing.com', { waitUntil: 'domcontentloaded' });
+                await page.waitForTimeout(5000);
+                
+                // 验证页面跳转是否成功
+                const currentUrl = page.url();
+                if (currentUrl.includes('rewards.bing.com')) {
+                    log('main', '主流程', `[${account.email}] 检测到仍在 Rewards 页面，强制跳转到 Bing 搜索页面...`);
+                    await page.goto('https://www.bing.com', { waitUntil: 'networkidle' });
+                    await page.waitForTimeout(3000);
+                }
+                
+                // 执行任务
+                if (taskType === 'desktop') {
+                    // 执行桌面端搜索任务
+                    log('main', '主流程', `[${account.email}] 开始执行桌面端搜索任务...`);
+                    await bot.workers.executeSearchOnBingActivity(page, {
+                        title: '智能交叉执行桌面端搜索',
+                        promotionType: 'urlreward',
+                        name: 'exploreonbing'
+                    });
+                } else {
+                    // 移动端只执行搜索任务（签到和阅读任务已在第一阶段完成）
+                    log('main', '主流程', `[${account.email}] 开始执行移动端搜索任务（带停滞检测）`);
+                    
+                    // 获取初始数据
+                    const initialData = await bot.browser.func.getDashboardData(page);
+                    
+                    // 执行移动端搜索任务
+                    if (bot.config.workers.doMobileSearch) {
+                        if (initialData.userStatus.counters.mobileSearch) {
+                            try {
+                                log('main', '主流程', `[${account.email}] 开始执行移动端搜索任务`);
+                                await bot.activities.doSearch(page, initialData, account.email);
+                                log('main', '主流程', `[${account.email}] 移动端搜索任务执行完成`);
+                            } catch (error) {
+                                const errorMessage = error instanceof Error ? error.message : String(error);
+                                log('main', '主流程', `[${account.email}] 移动端搜索任务执行失败: ${errorMessage}`, 'warn');
+                            }
+                        } else {
+                            log('main', '主流程', `[${account.email}] 移动端搜索任务已完成或不可用`);
+                        }
+                    }
+                    
+                    // 执行移动端每日活动任务
+                    if (bot.config.workers.doPunchCards || bot.config.workers.doDailyCheckIn) {
+                        try {
+                            log('main', '主流程', `[${account.email}] 开始执行移动端每日活动任务`);
+                            
+                            // 获取最新的任务数据
+                            const currentData = await bot.browser.func.getDashboardData(page);
+                            const allTasks = aiOrchestrator.getAllIncompleteTasks(currentData);
+                            
+                            if (allTasks.length > 0) {
+                                log('main', '主流程', `[${account.email}] 发现 ${allTasks.length} 个未完成的每日活动任务`);
+                                
+                                const executionPlan = await aiOrchestrator.getTaskExecutionPlan(allTasks);
+                                for (const task of executionPlan) {
+                                    try {
+                                        await bot.workers.executeSingleTask(page, task);
+                                        log('main', '主流程', `[${account.email}] 移动端完成每日活动任务: ${task.title}`);
+                                    } catch (taskError) {
+                                        const taskErrorMessage = taskError instanceof Error ? taskError.message : String(taskError);
+                                        log('main', '主流程', `[${account.email}] 移动端每日活动任务执行失败: ${task.title} - ${taskErrorMessage}`, 'warn');
+                                    }
+                                }
+                            } else {
+                                log('main', '主流程', `[${account.email}] 移动端没有未完成的每日活动任务`);
+                            }
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            log('main', '主流程', `[${account.email}] 移动端每日活动任务执行失败: ${errorMessage}`, 'warn');
+                        }
+                    }
+                    
+                    log('main', '主流程', `[${account.email}] 移动端完整任务流程执行完成（带停滞检测）`);
+                }
+                
+                log('main', '主流程', `[${account.email}] ${taskType} 搜索任务完成`);
+                
+                // 获取执行后的积分状态
+                const afterDashboardData = await bot.browser.func.getDashboardData(page);
+                let afterPoints = 0;
+                
+                if (taskType === 'desktop') {
+                    afterPoints = afterDashboardData.userStatus.counters.pcSearch?.[0]?.pointProgress || 0;
+                } else {
+                    afterPoints = afterDashboardData.userStatus.counters.mobileSearch?.[0]?.pointProgress || 0;
+                }
+                
+                log('main', '主流程', `[${account.email}] 执行后 ${taskType} 积分: ${afterPoints}`);
+                
+                // 检查积分停滞情况
+                const isStagnant = checkPointsStagnation(account, taskType, afterPoints);
+                
+                if (isStagnant) {
+                    // 积分停滞，进行页面分析
+                    log('main', '主流程', `[${account.email}] ⚠️ ${taskType} 积分停滞，进行页面分析...`, 'warn');
+                    const hasException = await analyzePageForExceptions(page, account, taskType);
+                    
+                    if (hasException) {
+                        log('main', '主流程', `[${account.email}] ⚠️ 检测到页面异常，暂停 ${taskType} 任务执行`, 'warn');
+                        // 标记该任务类型为停滞状态，下一轮会切换到其他任务类型
+                        return false;
+                    }
+                }
+                
+                // 保存积分数据
+                const pointsData = accountPointsData.get(account.email);
+                if (pointsData) {
+                    const todayStr = pointsData.todayStr;
+                    const dailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
+                    
+                    if (dailyPointsData && dailyPointsData.date === todayStr) {
+                        // 获取当前总积分，而不是任务积分
+                        const currentTotalPoints = afterDashboardData.userStatus.availablePoints;
+                        
+                        // 添加调试日志
+                        log('main', '主流程', `[${account.email}] 调试 - 获取到的总积分: ${currentTotalPoints}`);
+                        log('main', '主流程', `[${account.email}] 调试 - 任务类型: ${taskType}`);
+                        
+                        if (taskType === 'desktop') {
+                            dailyPointsData.desktopFinalPoints = currentTotalPoints;
+                            log('main', '主流程', `[${account.email}] 保存桌面端完成后的总积分: ${currentTotalPoints}`);
+                        } else {
+                            dailyPointsData.mobileFinalPoints = currentTotalPoints;
+                            log('main', '主流程', `[${account.email}] 保存移动端完成后的总积分: ${currentTotalPoints}`);
+                        }
+                        
+                        await saveDailyPoints(config.sessionPath, account.email, dailyPointsData);
+                    }
+                }
+                
+                // 检查任务是否完成（积分是否达到上限）
+                const isTaskCompleted = await checkTaskCompletion(account, taskType, accountPointsData);
+                return isTaskCompleted;
+                
+            } finally {
+                await page.close();
+            }
+            
+        } finally {
+            await browser.close();
+        }
+        
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        log('main', '主流程', `[${account.email}] ${taskType} 搜索任务执行失败: ${errorMessage}`, 'error');
+        return false;
+    }
+}
+
+/**
+ * 执行单个账户的一轮搜索任务（真正的交叉执行）
+ */
+async function runSingleAccountSearchTask(
+    account: Account, 
+    config: Config, 
+    taskType: 'desktop' | 'mobile',
+    accountPointsData: Map<string, {initialPoints: number, todayStr: string}>,
+    shouldCheckLogin: boolean = true
+): Promise<boolean> {
+    log('main', '主流程', `[${account.email}] 开始执行 ${taskType} 搜索任务`);
+    
+    try {
+        // 创建浏览器实例
+        const bot = new MicrosoftRewardsBot();
+        bot.account = account; // 设置当前账户信息
+        bot.axios = new Axios(account.proxy); // 初始化axios实例
+        
+        // 根据任务类型设置移动端模式
+        if (taskType === 'mobile') {
+            bot.isMobile = true;
+            log('main', '主流程', `[${account.email}] 设置为移动端模式`);
+        } else {
+            bot.isMobile = false;
+            log('main', '主流程', `[${account.email}] 设置为桌面端模式`);
+        }
+        
+        const browser = await bot.browserFactory.launchBrowser(account);
+        
+        try {
+            // 创建上下文并加载会话数据
+            const context = await bot.browserFactory.createContext(browser, account);
+            
+            const page = await context.newPage();
+            
+            try {
+                        // 先访问一个页面来激活会话
+                        log('main', '主流程', `[${account.email}] 激活会话状态...`);
+                        await page.goto('https://rewards.bing.com', { waitUntil: 'domcontentloaded' });
+                        await page.waitForTimeout(2000);
+                        
+                        // 根据参数决定是否进行登录检查
+                        if (shouldCheckLogin) {
+                            log('main', '主流程', `[${account.email}] 执行完整登录流程（包含登录检查）`);
+                            await bot.login.login(page, account.email, account.password);
+                        } else {
+                            log('main', '主流程', `[${account.email}] 跳过登录检查，直接使用现有会话`);
+                            // 简化逻辑：直接调用 login 方法，它会内部处理登录状态检查
+                            // 如果已经登录，login 方法会快速返回
+                            await bot.login.login(page, account.email, account.password);
+                        }
+                
+                        // 跳转到 Bing 搜索页面
+                        log('main', '主流程', `[${account.email}] 跳转到 Bing 搜索页面...`);
+                        await page.goto('https://www.bing.com', { waitUntil: 'domcontentloaded' });
+                        await page.waitForTimeout(5000);
+                        
+                        // 验证页面跳转是否成功
+                        const currentUrl = page.url();
+                        const pageTitle = await page.title();
+                        log('main', '主流程', `[${account.email}] 跳转后URL: ${currentUrl}`);
+                        log('main', '主流程', `[${account.email}] 跳转后标题: ${pageTitle}`);
+                        
+                        // 如果还在 Rewards 页面，强制跳转到 Bing 搜索页面
+                        if (currentUrl.includes('rewards.bing.com')) {
+                            log('main', '主流程', `[${account.email}] 检测到仍在 Rewards 页面，强制跳转到 Bing 搜索页面...`);
+                            await page.goto('https://www.bing.com', { waitUntil: 'networkidle' });
+                            await page.waitForTimeout(3000);
+                            
+                            const finalUrl = page.url();
+                            const finalTitle = await page.title();
+                            log('main', '主流程', `[${account.email}] 强制跳转后URL: ${finalUrl}`);
+                            log('main', '主流程', `[${account.email}] 强制跳转后标题: ${finalTitle}`);
+                        }
+                        
+                
+                // 执行完整的搜索任务（真正的交叉执行）
+                log('main', '主流程', `[${account.email}] 开始执行 ${taskType} 搜索任务...`);
+                
+                // 获取积分状态
+                const dashboardData = await bot.browser.func.getDashboardData(page);
+                if (taskType === 'desktop') {
+                    log('main', '主流程', `[${account.email}] 当前桌面端积分状态: ${dashboardData.userStatus.counters.pcSearch?.[0]?.pointProgress || 0}/${dashboardData.userStatus.counters.pcSearch?.[0]?.pointProgressMax || 0}`);
+                } else {
+                    log('main', '主流程', `[${account.email}] 当前移动端积分状态: ${dashboardData.userStatus.counters.mobileSearch?.[0]?.pointProgress || 0}/${dashboardData.userStatus.counters.mobileSearch?.[0]?.pointProgressMax || 0}`);
+                }
+                
+                // 根据任务类型执行相应的任务
+                if (taskType === 'desktop') {
+                    // 执行桌面端搜索任务
+                    await bot.workers.executeSearchOnBingActivity(page, {
+                        title: '交叉执行桌面端搜索',
+                        promotionType: 'urlreward',
+                        name: 'exploreonbing'
+                    });
+                } else {
+                    // 移动端只执行搜索任务（签到和阅读任务已在第一阶段完成）
+                    log('main', '主流程', `[${account.email}] 开始执行移动端搜索任务`);
+                    
+                    // 获取初始数据
+                    const initialData = await bot.browser.func.getDashboardData(page);
+                    
+                    // 执行移动端搜索任务
+                    if (bot.config.workers.doMobileSearch) {
+                        if (initialData.userStatus.counters.mobileSearch) {
+                            try {
+                                log('main', '主流程', `[${account.email}] 开始执行移动端搜索任务`);
+                                await bot.activities.doSearch(page, initialData, account.email);
+                                log('main', '主流程', `[${account.email}] 移动端搜索任务执行完成`);
+                            } catch (error) {
+                                const errorMessage = error instanceof Error ? error.message : String(error);
+                                log('main', '主流程', `[${account.email}] 移动端搜索任务执行失败: ${errorMessage}`, 'warn');
+                            }
+                        } else {
+                            log('main', '主流程', `[${account.email}] 移动端搜索任务已完成或不可用`);
+                        }
+                    }
+                    
+                    // 执行移动端每日活动任务
+                    if (bot.config.workers.doPunchCards || bot.config.workers.doDailyCheckIn) {
+                        try {
+                            log('main', '主流程', `[${account.email}] 开始执行移动端每日活动任务`);
+                            
+                            // 获取最新的任务数据
+                            const currentData = await bot.browser.func.getDashboardData(page);
+                            const allTasks = aiOrchestrator.getAllIncompleteTasks(currentData);
+                            
+                            if (allTasks.length > 0) {
+                                log('main', '主流程', `[${account.email}] 发现 ${allTasks.length} 个未完成的每日活动任务`);
+                                
+                                const executionPlan = await aiOrchestrator.getTaskExecutionPlan(allTasks);
+                                for (const task of executionPlan) {
+                                    try {
+                                        await bot.workers.executeSingleTask(page, task);
+                                        log('main', '主流程', `[${account.email}] 移动端完成每日活动任务: ${task.title}`);
+                                    } catch (taskError) {
+                                        const taskErrorMessage = taskError instanceof Error ? taskError.message : String(taskError);
+                                        log('main', '主流程', `[${account.email}] 移动端每日活动任务执行失败: ${task.title} - ${taskErrorMessage}`, 'warn');
+                                    }
+                                }
+                            } else {
+                                log('main', '主流程', `[${account.email}] 移动端没有未完成的每日活动任务`);
+                            }
+                        } catch (error) {
+                            const errorMessage = error instanceof Error ? error.message : String(error);
+                            log('main', '主流程', `[${account.email}] 移动端每日活动任务执行失败: ${errorMessage}`, 'warn');
+                        }
+                    }
+                    
+                    log('main', '主流程', `[${account.email}] 移动端完整任务流程执行完成`);
+                }
+                
+                log('main', '主流程', `[${account.email}] ${taskType} 搜索任务完成`);
+                
+                // 保存积分数据
+                const pointsData = accountPointsData.get(account.email);
+                if (pointsData) {
+                    const todayStr = pointsData.todayStr;
+                    const dailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
+                    
+                    if (dailyPointsData && dailyPointsData.date === todayStr) {
+                        // 获取最新的积分状态
+                        const latestDashboardData = await bot.browser.func.getDashboardData(page);
+                        if (latestDashboardData && latestDashboardData.userStatus) {
+                            // 保存总积分，而不是任务积分
+                            const currentTotalPoints = latestDashboardData.userStatus.availablePoints;
+                            
+                            // 添加调试日志
+                            log('main', '主流程', `[${account.email}] 调试 - 获取到的总积分: ${currentTotalPoints}`);
+                            log('main', '主流程', `[${account.email}] 调试 - 任务类型: ${taskType}`);
+                            
+                            if (taskType === 'desktop') {
+                                dailyPointsData.desktopFinalPoints = currentTotalPoints;
+                                log('main', '主流程', `[${account.email}] 保存桌面端完成后的总积分: ${currentTotalPoints}`);
+                            } else if (taskType === 'mobile') {
+                                dailyPointsData.mobileFinalPoints = currentTotalPoints;
+                                log('main', '主流程', `[${account.email}] 保存移动端完成后的总积分: ${currentTotalPoints}`);
+                            }
+                            
+                            // 保存更新后的积分数据
+                            await saveDailyPoints(config.sessionPath, account.email, dailyPointsData);
+                        }
+                    }
+                }
+                
+                // 检查任务是否完成（积分是否达到上限）
+                const isTaskCompleted = await checkTaskCompletion(account, taskType, accountPointsData);
+                return isTaskCompleted;
+                
+            } finally {
+                await page.close();
+            }
+            
+        } finally {
+            await browser.close();
+        }
+        
+    } catch (error) {
+        log('main', '主流程', `[${account.email}] ${taskType} 搜索任务失败: ${error}`, 'error');
+        throw error;
+    }
+}
+
+/**
+ * 执行交叉搜索任务（包含登录流程）
+ */
+async function executeCrossSearchTasksWithLogin(
+    accounts: Account[], 
+    config: Config, 
+    taskType: 'desktop' | 'mobile',
+    accountPointsData: Map<string, {initialPoints: number, todayStr: string}>,
+    skipLoginCheck: boolean = false
+) {
+    const maxRounds = 10; // 最大轮数，防止无限循环
+    let currentRound = 0;
+    let allCompleted = false;
+    
+    // 动态账户列表，会随着任务完成而减少
+    let activeAccounts = [...accounts];
+    
+    while (currentRound < maxRounds && !allCompleted && !shouldStopTask && activeAccounts.length > 0) {
+        currentRound++;
+        log('main', '主流程', `🔄 开始第 ${currentRound} 轮 ${taskType} 交叉执行（包含登录流程）`);
+        log('main', '主流程', `📊 当前活跃账户数量: ${activeAccounts.length}`);
+        
+        allCompleted = true;
+        const completedAccounts: Account[] = []; // 本轮完成的账户
+        
+        for (const account of activeAccounts) {
+            if (shouldStopTask) {
+                log('main', '主流程', `检测到停止指令，终止 ${taskType} 交叉执行`, 'warn');
+                return;
+            }
+            
+            log('main', '主流程', `[${account.email}] 开始第 ${currentRound} 轮 ${taskType} 任务（包含登录流程）`);
+            
+            try {
+                // 执行单个账户的一轮搜索任务（真正的交叉执行）
+                // 第一轮进行完整登录检查，后续轮次跳过登录检查
+                const shouldCheckLogin = !skipLoginCheck && currentRound === 1;
+                const isTaskCompleted = await runSingleAccountSearchTask(account, config, taskType, accountPointsData, shouldCheckLogin);
+                
+                if (isTaskCompleted) {
+                    log('main', '主流程', `[${account.email}] ${taskType} 任务已完成，从活跃列表中移除`);
+                    completedAccounts.push(account);
+                } else {
+                    log('main', '主流程', `[${account.email}] 第 ${currentRound} 轮 ${taskType} 任务完成，继续参与下一轮`);
+                    allCompleted = false; // 有未完成的任务，需要继续下一轮
+                }
+            } catch (error) {
+                log('main', '主流程', `[${account.email}] 第 ${currentRound} 轮 ${taskType} 任务失败: ${error}`, 'error');
+                allCompleted = false; // 有失败的任务，需要继续下一轮
+            }
+            
+            // 添加轮次间延迟
+            if (!shouldStopTask) {
+                await new Promise(resolve => setTimeout(resolve, 2000)); // 2秒延迟
+            }
+        }
+        
+        // 从活跃账户列表中移除已完成的账户
+        activeAccounts = activeAccounts.filter(account => !completedAccounts.includes(account));
+        
+        if (!allCompleted) {
+            log('main', '主流程', `第 ${currentRound} 轮 ${taskType} 交叉执行完成，有失败任务，继续下一轮`);
+        } else {
+            log('main', '主流程', `第 ${currentRound} 轮 ${taskType} 交叉执行完成，所有任务成功`);
+        }
+        
+        // 如果所有账户都完成了任务，退出循环
+        if (activeAccounts.length === 0) {
+            log('main', '主流程', `🎉 所有账户的 ${taskType} 任务都已完成，退出交叉执行`);
+            break;
+        }
+    }
+    
+    if (currentRound >= maxRounds) {
+        log('main', '主流程', `⚠️ ${taskType} 交叉执行达到最大轮数限制 (${maxRounds})，停止执行`, 'warn');
+    }
+}
+
+/**
+ * 检查任务是否完成（积分是否达到上限）
+ */
+async function checkTaskCompletion(account: Account, taskType: 'desktop' | 'mobile', accountPointsData: Map<string, {initialPoints: number, todayStr: string}>): Promise<boolean> {
+    try {
+        // 创建浏览器实例检查积分状态
+        const bot = new MicrosoftRewardsBot();
+        bot.account = account;
+        
+        // 根据任务类型设置移动端模式
+        if (taskType === 'mobile') {
+            bot.isMobile = true;
+            log('main', '主流程', `[${account.email}] 检查移动端任务完成状态`);
+        } else {
+            bot.isMobile = false;
+            log('main', '主流程', `[${account.email}] 检查桌面端任务完成状态`);
+        }
+        
+        const browser = await bot.browserFactory.launchBrowser(account);
+        
+        try {
+            const context = await bot.browserFactory.createContext(browser, account);
+            const page = await context.newPage();
+            
+            try {
+                // 访问 Rewards 页面获取积分状态
+                await page.goto('https://rewards.bing.com', { waitUntil: 'domcontentloaded' });
+                await page.waitForTimeout(2000);
+                
+                // 获取仪表板数据
+                const dashboardData = await bot.browser.func.getDashboardData(page);
+                if (dashboardData && dashboardData.userStatus && dashboardData.userStatus.counters) {
+                    if (taskType === 'desktop') {
+                        const pcSearch = dashboardData.userStatus.counters.pcSearch?.[0];
+                        if (pcSearch) {
+                            const isCompleted = pcSearch.pointProgress >= pcSearch.pointProgressMax;
+                            log('main', '主流程', `[${account.email}] 桌面端积分状态: ${pcSearch.pointProgress}/${pcSearch.pointProgressMax} (${isCompleted ? '已完成' : '未完成'})`);
+                            return isCompleted;
+                        } else {
+                            log('main', '主流程', `[${account.email}] 未找到桌面端搜索积分数据`, 'warn');
+                            return false; // 未找到数据时假设未完成
+                        }
+                    } else if (taskType === 'mobile') {
+                        const mobileSearch = dashboardData.userStatus.counters.mobileSearch?.[0];
+                        if (mobileSearch) {
+                            const isCompleted = mobileSearch.pointProgress >= mobileSearch.pointProgressMax;
+                            log('main', '主流程', `[${account.email}] 移动端积分状态: ${mobileSearch.pointProgress}/${mobileSearch.pointProgressMax} (${isCompleted ? '已完成' : '未完成'})`);
+                            return isCompleted;
+                        } else {
+                            log('main', '主流程', `[${account.email}] 未找到移动端搜索积分数据，检查桌面端数据作为备用`, 'warn');
+                            // 如果移动端数据不可用，检查桌面端数据作为备用
+                            const pcSearch = dashboardData.userStatus.counters.pcSearch?.[0];
+                            if (pcSearch) {
+                                const isCompleted = pcSearch.pointProgress >= pcSearch.pointProgressMax;
+                                log('main', '主流程', `[${account.email}] 使用桌面端积分状态作为移动端参考: ${pcSearch.pointProgress}/${pcSearch.pointProgressMax} (${isCompleted ? '已完成' : '未完成'})`);
+                                return isCompleted;
+                            } else {
+                                log('main', '主流程', `[${account.email}] 桌面端和移动端积分数据都不可用`, 'warn');
+                                return false; // 未找到数据时假设未完成
+                            }
+                        }
+                    }
+                }
+                
+                log('main', '主流程', `[${account.email}] 无法获取 ${taskType} 积分状态，假设未完成`, 'warn');
+                return false;
+                
+            } finally {
+                await page.close();
+            }
+            
+        } finally {
+            await browser.close();
+        }
+        
+    } catch (error) {
+        log('main', '主流程', `[${account.email}] 检查 ${taskType} 任务完成状态时出错: ${error}`, 'warn');
+        return false; // 出错时假设未完成，继续执行
+    }
+}
+
+/**
+ * 执行交叉搜索任务（仅搜索，不包含登录）
+ */
+async function executeCrossSearchTasks(
+    accounts: Account[], 
+    config: Config, 
+    taskType: 'desktop' | 'mobile',
+    accountPointsData: Map<string, {initialPoints: number, todayStr: string}>
+) {
+    const maxRounds = 10; // 最大轮数，防止无限循环
+    let currentRound = 0;
+    let allCompleted = false;
+    
+    while (currentRound < maxRounds && !allCompleted && !shouldStopTask) {
+        currentRound++;
+        log('main', '主流程', `🔄 开始第 ${currentRound} 轮 ${taskType} 交叉执行`);
+        
+        allCompleted = true;
+        
+        for (const account of accounts) {
+            if (shouldStopTask) {
+                log('main', '主流程', `检测到停止指令，终止 ${taskType} 交叉执行`, 'warn');
+                return;
+            }
+            
+            log('main', '主流程', `[${account.email}] 开始第 ${currentRound} 轮 ${taskType} 搜索任务`);
+            
+            try {
+                // 执行单个账户的搜索任务
+                await runTasksForAccounts([account], config, taskType);
+                log('main', '主流程', `[${account.email}] 第 ${currentRound} 轮 ${taskType} 搜索任务完成`);
+            } catch (error) {
+                log('main', '主流程', `[${account.email}] 第 ${currentRound} 轮 ${taskType} 搜索任务失败: ${error}`, 'error');
+                allCompleted = false; // 有失败的任务，需要继续下一轮
+            }
+            
+            // 添加轮次间延迟
+            if (!shouldStopTask) {
+                await new Promise(resolve => setTimeout(resolve, 2000)); // 2秒延迟
+            }
+        }
+        
+        if (!allCompleted) {
+            log('main', '主流程', `第 ${currentRound} 轮 ${taskType} 交叉执行完成，有失败任务，继续下一轮`);
+        } else {
+            log('main', '主流程', `第 ${currentRound} 轮 ${taskType} 交叉执行完成，所有任务成功`);
+        }
+    }
+    
+    if (currentRound >= maxRounds) {
+        log('main', '主流程', `⚠️ ${taskType} 交叉执行达到最大轮数限制 (${maxRounds})，停止执行`, 'warn');
+    }
+}
+
+/**
+ * 处理账户积分统计和上报
+ */
+async function processAccountPoints(account: Account, config: Config, todayStr: string, initialPointsToday: number): Promise<{email: string, points_gained: number, final_points: number, desktop_gain: number, mobile_gain: number} | null> {
+    // 获取最终积分并上报
+    const finalDailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
+    if (finalDailyPointsData && finalDailyPointsData.date === todayStr) {
+        // 正确计算最终积分：现在保存的是总积分，优先使用移动端完成后的总积分
+        let finalPoints = finalDailyPointsData.mobileFinalPoints || finalDailyPointsData.desktopFinalPoints || finalDailyPointsData.initialPoints || 0;
+        
+        // 修复积分计算逻辑：即使初始积分为0，也要计算实际收益
+        let dailyGain = 0;
+        if (initialPointsToday > 0) {
+            dailyGain = finalPoints - initialPointsToday;
+        } else if (finalPoints > 0) {
+            // 如果初始积分为0但最终积分大于0，说明有收益
+            dailyGain = finalPoints;
+        }
+        
+        log('main', '主流程', `[${account.email}] 积分统计 - 初始: ${initialPointsToday}, 最终: ${finalPoints}, 今日收益: ${dailyGain}`);
+        
+        // 验证积分数据合理性
+        if (finalPoints < 0) {
+            log('main', '主流程', `[${account.email}] ⚠️ 最终积分异常: ${finalPoints}，设置为0`, 'warn');
+            finalPoints = 0;
+        }
+        
+        if (dailyGain < 0) {
+            log('main', '主流程', `[${account.email}] ⚠️ 今日收益异常: ${dailyGain}，设置为0`, 'warn');
+            dailyGain = 0;
+        }
+        
+        // 计算桌面端和移动端的实际收益
+        let desktopGain = 0;
+        let mobileGain = 0;
+        
+        // 修复收益计算逻辑
+        if (finalDailyPointsData.desktopFinalPoints !== undefined) {
+            if (finalDailyPointsData.initialPoints > 0) {
+                // 如果有初始积分，计算差值
+                desktopGain = Math.max(0, finalDailyPointsData.desktopFinalPoints - finalDailyPointsData.initialPoints);
+            } else {
+                // 如果初始积分为0，桌面端收益就是桌面端最终积分
+                desktopGain = Math.max(0, finalDailyPointsData.desktopFinalPoints);
+            }
+        }
+        
+        if (finalDailyPointsData.mobileFinalPoints !== undefined) {
+            if (finalDailyPointsData.desktopFinalPoints !== undefined) {
+                // 移动端收益 = 移动端最终积分 - 桌面端最终积分
+                mobileGain = Math.max(0, finalDailyPointsData.mobileFinalPoints - finalDailyPointsData.desktopFinalPoints);
+            } else {
+                // 如果没有桌面端最终积分，移动端收益 = 移动端最终积分 - 初始积分
+                if (finalDailyPointsData.initialPoints > 0) {
+                    mobileGain = Math.max(0, finalDailyPointsData.mobileFinalPoints - finalDailyPointsData.initialPoints);
+                } else {
+                    mobileGain = Math.max(0, finalDailyPointsData.mobileFinalPoints);
+                }
+            }
+        }
+        
+        log('main', '主流程', `[${account.email}] 收益统计 - 桌面端: ${desktopGain}, 移动端: ${mobileGain}`);
+        log('main', '主流程', `[${account.email}] 积分数据详情 - 初始: ${finalDailyPointsData.initialPoints}, 桌面端最终: ${finalDailyPointsData.desktopFinalPoints}, 移动端最终: ${finalDailyPointsData.mobileFinalPoints}`);
+        
+        // 上报积分数据
+        const bot = new MicrosoftRewardsBot();
+        bot.config = config;
+        bot.account = account;
+        bot.axios = new Axios(account.proxy);
+        
+        await sendFinalUpdate(bot, {
+            email: account.email,
+            total_points: finalPoints,
+            daily_gain: dailyGain,
+            desktop_gain: desktopGain,
+            mobile_gain: mobileGain
+        });
+        
+        // 返回账户执行结果
+        return {
+            email: account.email,
+            points_gained: dailyGain,
+            final_points: finalPoints,
+            desktop_gain: desktopGain,
+            mobile_gain: mobileGain
+        };
+    } else {
+        log('main', '主流程', `[${account.email}] ⚠️ 未找到今日积分数据，跳过上报`, 'warn');
+        return null;
+    }
+}
+
+/**
+ * 重试账户失败任务
+ */
+async function retryAccountFailedTasks(email: string) {
+    try {
+        const retryResult = await retryFailedTasks(email);
+        if (retryResult.success > 0 || retryResult.failed > 0) {
+            log('main', '主流程', `账户 ${email} 失败任务重试完成: 成功 ${retryResult.success} 个，失败 ${retryResult.failed} 个`);
+        }
+    } catch (error) {
+        log('main', '主流程', `账户 ${email} 失败任务重试异常: ${error}`, 'warn');
+    }
+}
+
+/**
+ * 判断是否应该启用交叉执行模式
+ */
+async function shouldEnableCrossExecution(accounts: Account[], config: Config, searchCrossExecution: boolean): Promise<boolean> {
+    // 1. 检查配置是否启用交叉执行
+    if (!searchCrossExecution) {
+        log('main', '主流程', '📋 配置未启用交叉执行，使用顺序执行模式');
+        return false;
+    }
+    
+    // 2. 检查账户数量是否满足交叉执行条件（>=2个账户）
+    if (accounts.length < 2) {
+        log('main', '主流程', `📋 账户数量不足（${accounts.length}个），交叉执行需要至少2个账户，使用顺序执行模式`);
+        return false;
+    }
+    
+    log('main', '主流程', `🔍 开始预检查 ${accounts.length} 个账户的登录状态...`);
+    
+    // 3. 预检查所有账户的登录状态
+    const loginStatusResults = await checkAllAccountsLoginStatus(accounts, config);
+    const validAccounts = loginStatusResults.filter(result => result.isLoggedIn);
+    
+    log('main', '主流程', `🔍 登录状态检查完成：${validAccounts.length}/${accounts.length} 个账户登录成功`);
+    
+    // 4. 检查有效登录账户数量
+    if (validAccounts.length < 2) {
+        log('main', '主流程', `📋 有效登录账户数量不足（${validAccounts.length}个），交叉执行需要至少2个有效账户，使用顺序执行模式`);
+        log('main', '主流程', `💡 未登录的账户将在顺序执行模式中正常进行登录流程`);
+        return false;
+    }
+    
+    log('main', '主流程', `✅ 满足交叉执行条件：${validAccounts.length} 个有效账户，启用交叉执行模式`);
+    log('main', '主流程', `💡 未登录的账户将在交叉执行模式中正常进行登录流程`);
+    return true;
+}
+
+/**
+ * 检查所有账户的登录状态
+ */
+async function checkAllAccountsLoginStatus(accounts: Account[], config: Config): Promise<Array<{email: string, isLoggedIn: boolean, error?: string}>> {
+    const results: Array<{email: string, isLoggedIn: boolean, error?: string}> = [];
+    
+    for (const account of accounts) {
+        try {
+            log('main', '主流程', `🔍 检查账户 ${account.email} 的登录状态...`);
+            
+            // 创建浏览器实例进行登录状态检查（使用轻量级方式避免重复初始化）
+            const browserFactory = new MicrosoftRewardsBot().browserFactory;
+            const browser = await browserFactory.launchBrowser(account);
+            
+            try {
+                // 创建上下文并加载会话数据
+                const context = await browserFactory.createContext(browser, account);
+                
+                const page = await context.newPage();
+                
+                try {
+                    // 访问 Microsoft Rewards 页面检查登录状态
+                    await page.goto('https://rewards.bing.com', { 
+                        waitUntil: 'domcontentloaded', 
+                        timeout: 30000 
+                    });
+                    
+                    await page.waitForTimeout(3000);
+                    
+                    // 检查是否已登录
+                    const isLoggedIn = await checkPageLoginStatus(page);
+                    
+                    results.push({
+                        email: account.email,
+                        isLoggedIn: isLoggedIn
+                    });
+                    
+                    log('main', '主流程', `🔍 账户 ${account.email} 登录状态：${isLoggedIn ? '已登录' : '未登录'}`);
+                    
+                } finally {
+                    await page.close();
+                }
+                
+            } finally {
+                await browser.close();
+            }
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            log('main', '主流程', `🔍 账户 ${account.email} 登录状态检查失败: ${errorMessage}`, 'warn');
+            
+            results.push({
+                email: account.email,
+                isLoggedIn: false,
+                error: errorMessage
+            });
+        }
+    }
+    
+    return results;
+}
+
+/**
+ * 检查页面登录状态
+ */
+async function checkPageLoginStatus(page: any): Promise<boolean> {
+    try {
+        // 检查多种登录状态指示器
+        const loginIndicators = [
+            // 用户头像或账户信息
+            '[data-testid="identityBanner"]',
+            '.user-avatar',
+            '.account-info',
+            '[aria-label*="@"]',
+            '.profile_img',
+            '#img_sec',
+            '#redirect_info_link',
+            '[id*="mectrl"]',
+            '[class*="profile"]',
+            
+            // 注销链接
+            'a:has-text("注销")',
+            'a:has-text("Sign out")',
+            'a:has-text("登出")',
+            '[href*="Signout"]',
+            
+            // 积分信息
+            'text=points',
+            'text=积分',
+            'text=Rewards',
+            'text=奖励',
+            
+            // 活动相关元素
+            '[data-bi-id]',
+            '.pointLink',
+            '.activity-item',
+            '[class*="activity"]',
+            '[class*="task"]'
+        ];
+        
+        for (const selector of loginIndicators) {
+            try {
+                const element = await page.$(selector);
+                if (element) {
+                    const isVisible = await element.isVisible();
+                    if (isVisible) {
+                        return true;
+                    }
+                }
+            } catch (e) {
+                // 忽略选择器错误，继续检查下一个
+            }
+        }
+        
+        // 检查页面标题
+        const pageTitle = await page.title();
+        if (pageTitle.includes('Microsoft Rewards') || 
+            pageTitle.includes('Bing Rewards') || 
+            pageTitle.includes('Rewards') ||
+            pageTitle.includes('Dashboard')) {
+            return true;
+        }
+        
+        // 检查URL
+        const currentUrl = page.url();
+        if (currentUrl.includes('uaid=') || 
+            currentUrl.includes('account.live.com') ||
+            currentUrl.includes('rewards.bing.com')) {
+            return true;
+        }
+        
+        return false;
+        
+    } catch (error) {
+        log('main', '主流程', `检查页面登录状态时出错: ${error}`, 'warn');
+        return false;
     }
 }
 

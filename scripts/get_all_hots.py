@@ -8,7 +8,7 @@ import sys
 import argparse
 
 # --- 全局变量与函数 ---
-CONFIG_FILE_PATH = '/app/dist/config.json'
+CONFIG_FILE_PATH = '/app/config.json'  # 修复：使用正确的配置文件路径
 ACCOUNTS_FILE_PATH = '/app/dist/accounts.json'
 SEARCH_TERMS_DIR = '/app/dist/search_terms'
 

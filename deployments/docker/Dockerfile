@@ -19,7 +19,8 @@ COPY app/ .
 
 # 添加调试信息并修复构建
 RUN echo "开始TypeScript编译..." && \
-    # 跳过pre-build脚本中的playwright安装，直接编译TypeScript
+    # 递增版本号并编译TypeScript
+    npm run version:bump && \
     npx tsc && \
     echo "TypeScript编译完成" && \
     ls -la dist/
@@ -58,6 +59,7 @@ RUN npm config set registry https://registry.npmmirror.com && \
 
 # Copy compiled app and python script from the builder stage
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/build-info.json ./build-info.json
 COPY scripts/get_all_hots.py .
 COPY app/requirements.txt .
 

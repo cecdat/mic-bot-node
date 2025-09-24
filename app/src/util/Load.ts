@@ -24,6 +24,7 @@ export interface NodeConfig {
     clusters: number;
     search_delay_min: string;
     search_delay_max: string;
+    search_cross_execution: boolean;
 }
 
 export async function loadNodeConfig(): Promise<NodeConfig | null> {
@@ -179,7 +180,7 @@ export async function loadSessionData(sessionPath: string, email: string, isMobi
             cookies = JSON.parse(cookiesData)
         }
 
-        const fingerprintFile = path.join(__dirname, '../../sessions', email, `${isMobile ? 'mobile_fingerpint' : 'desktop_fingerpint'}.json`)
+        const fingerprintFile = path.join(__dirname, '../../sessions', email, `${isMobile ? 'mobile_fingerprint' : 'desktop_fingerprint'}.json`)
         let fingerprint!: BrowserFingerprintWithHeaders
         if (((saveFingerprint.desktop && !isMobile) || (saveFingerprint.mobile && isMobile)) && fs.existsSync(fingerprintFile)) {
             const fingerprintData = await fs.promises.readFile(fingerprintFile, 'utf-8')
@@ -208,13 +209,13 @@ export async function saveSessionData(sessionPath: string, browser: BrowserConte
     }
 }
 
-export async function saveFingerprintData(sessionPath: string, email: string, isMobile: boolean, fingerpint: BrowserFingerprintWithHeaders): Promise<string> {
+export async function saveFingerprintData(sessionPath: string, email: string, isMobile: boolean, fingerprint: BrowserFingerprintWithHeaders): Promise<string> {
     try {
         const sessionDir = path.join(__dirname, '../../sessions', email)
         if (!fs.existsSync(sessionDir)) {
             await fs.promises.mkdir(sessionDir, { recursive: true })
         }
-        await fs.promises.writeFile(path.join(sessionDir, `${isMobile ? 'mobile_fingerpint' : 'desktop_fingerpint'}.json`), JSON.stringify(fingerpint))
+        await fs.promises.writeFile(path.join(sessionDir, `${isMobile ? 'mobile_fingerprint' : 'desktop_fingerprint'}.json`), JSON.stringify(fingerprint))
         return sessionDir
     } catch (error) {
         throw new Error(error as string)

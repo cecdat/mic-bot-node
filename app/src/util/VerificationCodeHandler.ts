@@ -9,6 +9,9 @@ export interface VerificationCodeConfig {
     timeout?: number;
 }
 
+// 全局验证码处理锁，防止多个端同时处理同一个账户的验证码
+const verificationLocks = new Map<string, boolean>();
+
 export class VerificationCodeHandler {
     private config: VerificationCodeConfig;
     private currentVerificationId: number | null = null;
@@ -35,9 +38,20 @@ export class VerificationCodeHandler {
             return false;
         }
 
-        try {
-            log('main', '验证码处理', `开始处理账户 ${accountEmail} 的辅助邮箱验证码`);
+        // 创建验证码处理锁的键
+        const lockKey = `${accountEmail}_verification`;
+        
+        // 检查是否已有其他端在处理验证码
+        if (verificationLocks.has(lockKey)) {
+            log('main', '验证码处理', `账户 ${accountEmail} 的验证码正在被其他端处理，跳过当前处理`, 'warn');
+            return false;
+        }
 
+        // 设置锁
+        verificationLocks.set(lockKey, true);
+        log('main', '验证码处理', `[${deviceType}] 开始处理账户 ${accountEmail} 的辅助邮箱验证码`);
+
+        try {
             // 等待验证码输入页面加载
             await this.waitForVerificationPage(page, deviceType);
 
@@ -59,16 +73,20 @@ export class VerificationCodeHandler {
             // 等待验证结果
             const success = await this.waitForVerificationResult(page, deviceType);
             if (success) {
-                log('main', '验证码处理', `账户 ${accountEmail} 验证码验证成功`);
+                log('main', '验证码处理', `[${deviceType}] 账户 ${accountEmail} 验证码验证成功`);
                 return true;
             } else {
-                log('main', '验证码处理', `账户 ${accountEmail} 验证码验证失败`);
+                log('main', '验证码处理', `[${deviceType}] 账户 ${accountEmail} 验证码验证失败`);
                 return false;
             }
 
         } catch (error) {
-            log('main', '验证码处理', `处理验证码时出错: ${error}`, 'error');
+            log('main', '验证码处理', `[${deviceType}] 处理验证码时出错: ${error}`, 'error');
             return false;
+        } finally {
+            // 释放锁
+            verificationLocks.delete(lockKey);
+            log('main', '验证码处理', `[${deviceType}] 释放账户 ${accountEmail} 的验证码处理锁`);
         }
     }
 
@@ -82,6 +100,22 @@ export class VerificationCodeHandler {
             if (isIdentityVerificationPage) {
                 log('main', '验证码处理', '检测到身份验证选择页面，准备发送验证码');
                 await this.handleIdentityVerificationPage(page, deviceType);
+                return;
+            }
+
+            // 检查是否在"Sign in another way"页面
+            const isSignInAnotherWayPage = await this.isSignInAnotherWayPage(page);
+            if (isSignInAnotherWayPage) {
+                log('main', '验证码处理', '检测到Sign in another way页面，准备点击Use your password');
+                await this.handleSignInAnotherWayPage(page, deviceType);
+                return;
+            }
+
+            // 检查是否在"即将完成"页面
+            const isAlmostDonePage = await this.isAlmostDonePage(page);
+            if (isAlmostDonePage) {
+                log('main', '验证码处理', '检测到即将完成页面，准备点击发送验证码链接');
+                await this.handleAlmostDonePage(page, deviceType);
                 return;
             }
 
@@ -352,6 +386,184 @@ export class VerificationCodeHandler {
     }
 
     /**
+     * 检查是否在"Sign in another way"页面
+     */
+    private async isSignInAnotherWayPage(page: Page): Promise<boolean> {
+        try {
+            // 检查页面标题
+            const title = await page.title();
+            if (title.includes('Sign in another way') || title.includes('另一种方式登录')) {
+                log('main', '验证码处理', '通过页面标题检测到Sign in another way页面');
+                return true;
+            }
+
+            // 检查页面内容
+            const pageText = await page.textContent('body');
+            if (pageText && (pageText.includes('Sign in another way') || pageText.includes('Use your password') || pageText.includes('Use your face'))) {
+                log('main', '验证码处理', '通过页面内容检测到Sign in another way页面');
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            log('main', '验证码处理', `检查Sign in another way页面时出错: ${error}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * 处理"Sign in another way"页面
+     */
+    private async handleSignInAnotherWayPage(page: Page, deviceType: string = 'pc'): Promise<void> {
+        try {
+            log('main', '验证码处理', '正在处理Sign in another way页面');
+            
+            // 等待页面稳定
+            await page.waitForTimeout(2000);
+            
+            // 检查并移除可能阻止点击的覆盖层
+            await this.removeBlockingOverlays(page);
+            
+            // 点击"Use your password"选项
+            const passwordOptionTexts = [
+                'Use your password',
+                '使用密码',
+                'Use password',
+                'Password'
+            ];
+            
+            for (const text of passwordOptionTexts) {
+                try {
+                    const link = await page.locator(`text*="${text}"`).first();
+                    if (await link.isVisible({ timeout: 3000 }).catch(() => false)) {
+                        // 滚动到链接位置
+                        await link.scrollIntoViewIfNeeded();
+                        await page.waitForTimeout(500);
+                        
+                        // 尝试点击
+                        try {
+                            await link.click({ timeout: 5000, force: true });
+                            log('main', '验证码处理', `已点击密码选项: ${text}`);
+                        } catch (clickError) {
+                            // 如果普通点击失败，尝试JavaScript点击
+                            log('main', '验证码处理', '普通点击失败，尝试JavaScript点击', 'warn');
+                            await link.evaluate((element: HTMLElement) => element.click());
+                            log('main', '验证码处理', `已通过JavaScript点击密码选项: ${text}`);
+                        }
+                        return;
+                    }
+                } catch (error) {
+                    // 继续尝试下一个文本
+                }
+            }
+            
+            log('main', '验证码处理', '未找到密码选项', 'warn');
+        } catch (error) {
+            log('main', '验证码处理', `处理Sign in another way页面时出错: ${error}`, 'error');
+        }
+    }
+
+    /**
+     * 检查是否在"即将完成"页面
+     */
+    private async isAlmostDonePage(page: Page): Promise<boolean> {
+        try {
+            // 检查页面标题
+            const title = await page.title();
+            if (title.includes('即将完成') || title.includes('Almost done')) {
+                log('main', '验证码处理', '通过页面标题检测到即将完成页面');
+                return true;
+            }
+
+            // 检查页面内容
+            const pageText = await page.textContent('body');
+            if (pageText && (pageText.includes('即将完成') || pageText.includes('Almost done'))) {
+                log('main', '验证码处理', '通过页面内容检测到即将完成页面');
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            log('main', '验证码处理', `检查即将完成页面时出错: ${error}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * 处理"即将完成"页面
+     */
+    private async handleAlmostDonePage(page: Page, deviceType: string = 'pc'): Promise<void> {
+        try {
+            log('main', '验证码处理', '正在处理即将完成页面');
+            
+            // 等待页面稳定
+            await page.waitForTimeout(2000);
+            
+            // 检查并移除可能阻止点击的覆盖层
+            await this.removeBlockingOverlays(page);
+            
+            // 统一的链接文本列表（移动端和桌面端使用相同的逻辑）
+            const linkTexts = [
+                '向 cs*****@139.com 发送电子邮件',  // 实际页面显示的文本
+                '向',
+                '发送电子邮件',
+                '将代码发送到',
+                '将代码发送',
+                'Send code to',
+                'Send the code to',
+                'Send verification code to',
+                'Send email',
+                'Email me',
+                'Send me an email'
+            ];
+            
+            for (const text of linkTexts) {
+                try {
+                    // 尝试多种选择器：按钮、链接、span等
+                    const selectors = [
+                        `button:has-text("${text}")`,
+                        `a:has-text("${text}")`,
+                        `span:has-text("${text}")`,
+                        `text*="${text}"`
+                    ];
+                    
+                    for (const selector of selectors) {
+                        try {
+                            const element = await page.locator(selector).first();
+                            if (await element.isVisible({ timeout: 3000 }).catch(() => false)) {
+                                // 滚动到元素位置
+                                await element.scrollIntoViewIfNeeded();
+                                await page.waitForTimeout(500);
+                                
+                                // 尝试点击
+                                try {
+                                    await element.click({ timeout: 5000, force: true });
+                                    log('main', '验证码处理', `${deviceType}端已点击: ${text} (选择器: ${selector})`);
+                                } catch (clickError) {
+                                    // 如果普通点击失败，尝试JavaScript点击
+                                    log('main', '验证码处理', '普通点击失败，尝试JavaScript点击', 'warn');
+                                    await element.evaluate((el: HTMLElement) => el.click());
+                                    log('main', '验证码处理', `${deviceType}端已通过JavaScript点击: ${text} (选择器: ${selector})`);
+                                }
+                                return;
+                            }
+                        } catch (error) {
+                            // 继续尝试下一个选择器
+                            continue;
+                        }
+                    }
+                } catch (error) {
+                    // 继续尝试下一个文本
+                }
+            }
+            
+            log('main', '验证码处理', '未找到发送验证码的链接', 'warn');
+        } catch (error) {
+            log('main', '验证码处理', `处理即将完成页面时出错: ${error}`, 'error');
+        }
+    }
+
+    /**
      * 检查是否在辅助邮箱输入页面
      */
     private async isAuxiliaryEmailInputPage(page: Page): Promise<boolean> {
@@ -405,14 +617,40 @@ export class VerificationCodeHandler {
             // 等待一下确保输入完成
             await page.waitForTimeout(1000);
 
+            // 检查并移除可能阻止点击的覆盖层
+            await this.removeBlockingOverlays(page);
+            
             // 查找并点击发送按钮
-            const sendButton = await page.$('button[type="submit"], button:has-text("发送验证码"), button:has-text("Send"), [data-testid="primaryButton"]');
-            if (sendButton) {
-                await sendButton.click();
-                log('main', '验证码处理', '已点击发送验证码按钮');
+            const sendButton = await page.locator('button[type="submit"], button:has-text("发送验证码"), button:has-text("Send"), [data-testid="primaryButton"]').first();
+            if (await sendButton.isVisible({ timeout: 5000 }).catch(() => false)) {
+                // 滚动到按钮位置
+                await sendButton.scrollIntoViewIfNeeded();
+                
+                // 等待按钮稳定
+                await page.waitForTimeout(500);
+                
+                // 尝试点击按钮，使用force选项绕过覆盖层
+                try {
+                    await sendButton.click({ timeout: 10000, force: true });
+                    log('main', '验证码处理', '已点击发送验证码按钮');
+                } catch (clickError) {
+                    // 如果普通点击失败，尝试使用JavaScript点击
+                    log('main', '验证码处理', '普通点击失败，尝试JavaScript点击', 'warn');
+                    await sendButton.evaluate((button: HTMLButtonElement) => button.click());
+                    log('main', '验证码处理', '已通过JavaScript点击发送验证码按钮');
+                }
                 
                 // 等待发送确认
                 await page.waitForTimeout(3000);
+                
+                // 创建验证码请求
+                const verificationId = await this.requestVerificationCode(this.config.main_account_email!);
+                if (verificationId) {
+                    log('main', '验证码处理', `验证码请求已创建，ID: ${verificationId}`);
+                    this.currentVerificationId = verificationId;
+                } else {
+                    log('main', '验证码处理', '创建验证码请求失败，但继续流程');
+                }
             } else {
                 log('main', '验证码处理', '未找到发送按钮', 'warn');
             }
@@ -427,6 +665,12 @@ export class VerificationCodeHandler {
      */
     private async needsToSendCode(page: Page): Promise<boolean> {
         try {
+            // 如果已经有验证码ID，说明已经发送过验证码了
+            if (this.currentVerificationId) {
+                log('main', '验证码处理', '已有验证码ID，跳过发送验证码');
+                return false;
+            }
+            
             // 检查是否有发送验证码的按钮
             const sendButton = await page.$('button[data-testid*="send"], button:has-text("发送"), button:has-text("Send")');
             return !!sendButton;
@@ -436,13 +680,78 @@ export class VerificationCodeHandler {
     }
 
     /**
+     * 移除阻止点击的覆盖层
+     */
+    private async removeBlockingOverlays(page: Page): Promise<void> {
+        try {
+            // 检查并移除lightbox-cover覆盖层
+            const lightboxCover = await page.$('#lightbox-cover');
+            if (lightboxCover) {
+                log('main', '验证码处理', '检测到lightbox-cover覆盖层，尝试移除');
+                await lightboxCover.evaluate((element: HTMLElement) => {
+                    element.style.display = 'none';
+                    element.remove();
+                });
+                log('main', '验证码处理', '已移除lightbox-cover覆盖层');
+            }
+            
+            // 检查并移除其他可能的覆盖层
+            const overlays = await page.$$('[class*="overlay"], [class*="modal"], [class*="lightbox"], [class*="cover"]');
+            for (const overlay of overlays) {
+                const isVisible = await overlay.isVisible().catch(() => false);
+                if (isVisible) {
+                    const className = await overlay.getAttribute('class').catch(() => '');
+                    if (className.includes('cover') || className.includes('overlay')) {
+                        log('main', '验证码处理', `检测到覆盖层: ${className}，尝试移除`);
+                        await overlay.evaluate((element: HTMLElement) => {
+                            element.style.display = 'none';
+                            element.remove();
+                        });
+                    }
+                }
+            }
+            
+            // 等待页面稳定
+            await page.waitForTimeout(500);
+        } catch (error) {
+            log('main', '验证码处理', `移除覆盖层时出错: ${error}`, 'warn');
+        }
+    }
+
+    /**
      * 发送验证码
      */
     private async sendVerificationCode(page: Page, mainAccountEmail: string): Promise<void> {
         try {
-            // 点击发送验证码按钮
-            await page.click('button[data-testid*="send"], button:has-text("发送"), button:has-text("Send")');
-            log('main', '验证码处理', '已点击发送验证码按钮');
+            // 等待页面稳定
+            await page.waitForTimeout(1000);
+            
+            // 检查并移除可能阻止点击的覆盖层
+            await this.removeBlockingOverlays(page);
+            
+            // 查找发送验证码按钮
+            const sendButton = await page.locator('button[data-testid*="send"], button:has-text("发送"), button:has-text("Send")').first();
+            
+            if (await sendButton.isVisible({ timeout: 5000 }).catch(() => false)) {
+                // 滚动到按钮位置
+                await sendButton.scrollIntoViewIfNeeded();
+                
+                // 等待按钮稳定
+                await page.waitForTimeout(500);
+                
+                // 尝试点击按钮，使用force选项绕过覆盖层
+                try {
+                    await sendButton.click({ timeout: 10000, force: true });
+                    log('main', '验证码处理', '已点击发送验证码按钮');
+                } catch (clickError) {
+                    // 如果普通点击失败，尝试使用JavaScript点击
+                    log('main', '验证码处理', '普通点击失败，尝试JavaScript点击', 'warn');
+                    await sendButton.evaluate((button: HTMLButtonElement) => button.click());
+                    log('main', '验证码处理', '已通过JavaScript点击发送验证码按钮');
+                }
+            } else {
+                throw new Error('未找到发送验证码按钮');
+            }
             
             // 等待发送确认
             await page.waitForTimeout(2000);
@@ -598,8 +907,45 @@ export class VerificationCodeHandler {
                 return false;
             }
 
-            // 检查是否还在登录页面，如果是则可能验证失败
+            // 检查页面标题和内容来判断验证是否成功
+            const pageTitle = await page.title();
+            log('main', '验证码处理', `验证后页面标题: ${pageTitle}`);
+            
+            // 如果页面标题包含成功相关的关键词，认为验证成功
+            if (pageTitle.includes('Microsoft Rewards') || 
+                pageTitle.includes('Bing Rewards') ||
+                pageTitle.includes('Rewards') ||
+                pageTitle.includes('Dashboard') ||
+                pageTitle.includes('Account')) {
+                log('main', '验证码处理', '验证成功：页面标题显示已登录状态');
+                return true;
+            }
+
+            // 检查是否还在登录页面，但需要更精确的判断
             if (currentUrl.includes('login.live.com') || currentUrl.includes('login.microsoftonline.com')) {
+                // 检查URL参数，如果包含route参数，可能是正常的跳转过程
+                if (currentUrl.includes('route=') || currentUrl.includes('opid=')) {
+                    log('main', '验证码处理', '验证可能成功：URL包含跳转参数，等待进一步跳转');
+                    // 等待更长时间看是否会跳转
+                    await page.waitForTimeout(10000);
+                    const newUrl = page.url();
+                    if (newUrl !== currentUrl) {
+                        log('main', '验证码处理', `页面已跳转到: ${newUrl}`);
+                        if (newUrl.includes('rewards.bing.com') || newUrl.includes('bing.com')) {
+                            log('main', '验证码处理', '验证成功：页面已跳转到目标网站');
+                            return true;
+                        }
+                    }
+                }
+                
+                // 如果页面标题不是登录相关，可能已经成功
+                if (!pageTitle.toLowerCase().includes('sign in') && 
+                    !pageTitle.toLowerCase().includes('login') && 
+                    !pageTitle.toLowerCase().includes('登录')) {
+                    log('main', '验证码处理', '验证可能成功：页面标题不包含登录关键词');
+                    return true;
+                }
+                
                 log('main', '验证码处理', '验证可能失败：仍在登录页面');
                 return false;
             }
@@ -626,7 +972,8 @@ export class VerificationCodeHandler {
     private async requestVerificationCode(mainAccountEmail: string): Promise<number | null> {
         try {
             const axios = require('axios');
-            const config = require('../config.json');
+            const { loadConfig } = require('./Load');
+            const config = loadConfig();
             
             if (!config.apiServer?.enabled || !config.apiServer?.updateUrl || !config.apiServer?.token) {
                 log('main', '验证码处理', 'API配置不完整，无法请求验证码');
@@ -664,7 +1011,8 @@ export class VerificationCodeHandler {
     private async checkVerificationCode(verificationId: number): Promise<{status: string, code?: string}> {
         try {
             const axios = require('axios');
-            const config = require('../config.json');
+            const { loadConfig } = require('./Load');
+            const config = loadConfig();
             
             const apiUrl = new URL(config.apiServer!.updateUrl);
             apiUrl.pathname = `/web_api/verification/check/${verificationId}`;
