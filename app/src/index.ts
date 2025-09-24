@@ -21,7 +21,7 @@ import { PageExceptionDetector, PageExceptionResult } from './handlers/PageExcep
 import Axios from './util/Axios';
 import { Account } from './interface/Account';
 import axios from 'axios';
-import { Config } from './interface/Config';
+import { Config } from './interface/Config'; 
 import { displayVersion, getVersionManager } from './util/Version'; 
 
 // 添加全局变量跟踪任务运行状态
@@ -581,11 +581,11 @@ class NodeWebSocketClient {
             this.isReconnecting = false;
             this.processQueue(); // 处理队列中的消息
             
-            // 连接成功后立即尝试加入房间，不依赖checkInNode
+            // 连接成功后延迟尝试加入房间，确保节点注册完成
             setTimeout(() => {
-                log('main', 'WebSocket', '🏠 连接成功后立即尝试加入节点房间...');
+                log('main', 'WebSocket', '🏠 连接成功后延迟尝试加入节点房间...');
                 this.joinNodeRoom();
-            }, 2000); // 2秒后尝试加入房间
+            }, 3000); // 3秒后尝试加入房间，给节点注册更多时间
             
             // 确保连接后立即检查任务
             setTimeout(() => {
@@ -967,10 +967,32 @@ async function executeTasks() {
             
             if (shouldUseCrossExecution) {
                 log('main', '主流程', '🔄 启用搜索任务交叉执行模式');
+                
+                // 发送任务开始执行事件
+                if (wsClient && wsClient.connected) {
+                    wsClient.emitTaskStatusUpdate('cross_execution', 'executing', config.nodeName);
+                }
+                
                 await executeTasksWithCrossExecution(accounts, config, taskResult);
-            } else {
+                
+                // 发送任务完成事件
+                if (wsClient && wsClient.connected) {
+                    wsClient.emitTaskStatusUpdate('cross_execution', 'completed', config.nodeName, taskResult);
+                }
+                        } else {
                 log('main', '主流程', '📋 使用传统顺序执行模式');
+                
+                // 发送任务开始执行事件
+                if (wsClient && wsClient.connected) {
+                    wsClient.emitTaskStatusUpdate('sequential_execution', 'executing', config.nodeName);
+                }
+                
                 await executeTasksSequentially(accounts, config, taskResult);
+                
+                // 发送任务完成事件
+                if (wsClient && wsClient.connected) {
+                    wsClient.emitTaskStatusUpdate('sequential_execution', 'completed', config.nodeName, taskResult);
+                }
             }
             
             // 更新任务结果
@@ -1567,8 +1589,8 @@ async function checkInNode() {
                 }
             } else {
                 // 任务执行状态下，正常输出心跳日志
-                log('main', '节点管理', `📡 向中心服务器签到/发送心跳: ${apiConfig.nodeName}`);
-                log('main', '节点管理', `🌐 服务地址: ${checkinUrl.toString()}`);
+            log('main', '节点管理', `📡 向中心服务器签到/发送心跳: ${apiConfig.nodeName}`);
+            log('main', '节点管理', `🌐 服务地址: ${checkinUrl.toString()}`);
             }
         }
         
@@ -1581,8 +1603,13 @@ async function checkInNode() {
         if (wsClient && wsClient.connected) {
             // 检查是否已经加入房间，如果没有则尝试加入
             if (!wsClient.isRoomJoined) {
-                log('main', '节点管理', '🏠 节点注册成功，确保WebSocket房间已加入...');
-                wsClient.joinNodeRoom();
+                log('main', '节点管理', '🏠 节点注册成功，延迟1秒后确保WebSocket房间已加入...');
+                // 添加延迟，确保服务端数据库事务已提交
+                setTimeout(() => {
+                    if (wsClient && wsClient.connected && !wsClient.isRoomJoined) {
+                        wsClient.joinNodeRoom();
+                    }
+                }, 1000); // 1秒延迟
             } else {
                 log('main', '节点管理', '✅ WebSocket房间已加入，无需重复加入');
             }
@@ -1595,7 +1622,7 @@ async function checkInNode() {
             
             // 抑制频繁的恢复日志，每5分钟最多输出一次
             if (now - lastRecoveryLogTime > RECOVERY_LOG_INTERVAL) {
-                log('main', '节点管理', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
+            log('main', '节点管理', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
                 lastRecoveryLogTime = now;
             }
             
@@ -2877,7 +2904,7 @@ async function main() {
                     
                     // 抑制频繁的恢复日志，每5分钟最多输出一次
                     if (now - lastRecoveryLogTime > RECOVERY_LOG_INTERVAL) {
-                        log('main', '主流程', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
+                    log('main', '主流程', `🔄 服务端已恢复！离线时长: ${offlineDuration}秒`, 'warn');
                         lastRecoveryLogTime = now;
                     }
                     
@@ -3089,7 +3116,7 @@ async function main() {
                 if (isTimeoutError) {
                     // 超时错误每10次才记录一次，或者距离上次记录超过5分钟
                     if (consecutiveErrors % 10 === 1 || errorTime - lastServerErrorTime > 300000) {
-                        log('main', '主流程', `主循环出错 (${consecutiveErrors}/${maxConsecutiveErrors}): ${errorMessage}`, 'warn');
+                    log('main', '主流程', `主循环出错 (${consecutiveErrors}/${maxConsecutiveErrors}): ${errorMessage}`, 'warn');
                         lastServerErrorTime = errorTime;
                     }
                 } else if (errorTime - lastServerErrorTime > ERROR_SUPPRESS_INTERVAL) {
@@ -3365,6 +3392,29 @@ async function executeAllAccountsMobileCheckInAndReadTasks(
                         }
                     } else if (!accessToken && bot.config.workers.doReadToEarn) {
                         log('main', '主流程', `[${account.email}] 跳过移动端阅读赚积分任务（访问令牌获取失败）`, 'warn');
+                    }
+                    
+                    // 获取移动端签到和阅读任务完成后的积分数据
+                    const afterMobileTasksData = await bot.browser.func.getDashboardData(page);
+                    if (afterMobileTasksData && afterMobileTasksData.userStatus) {
+                        const currentTotalPoints = afterMobileTasksData.userStatus.availablePoints;
+                        
+                        // 保存移动端签到和阅读任务完成后的积分
+                        const pointsData = accountPointsData.get(account.email);
+                        if (pointsData) {
+                            const todayStr = pointsData.todayStr;
+                            const dailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
+                            
+                            if (dailyPointsData && dailyPointsData.date === todayStr) {
+                                // 如果还没有桌面端最终积分，将移动端签到阅读后的积分作为桌面端最终积分
+                                if (dailyPointsData.desktopFinalPoints === undefined) {
+                                    dailyPointsData.desktopFinalPoints = currentTotalPoints;
+                                    log('main', '主流程', `[${account.email}] 保存移动端签到阅读后的积分作为桌面端最终积分: ${currentTotalPoints}`);
+                                }
+                                
+                                await saveDailyPoints(config.sessionPath, account.email, dailyPointsData);
+                            }
+                        }
                     }
                     
                     log('main', '主流程', `[${account.email}] 移动端签到和阅读任务执行完成`);
@@ -4144,8 +4194,15 @@ async function processAccountPoints(account: Account, config: Config, todayStr: 
     // 获取最终积分并上报
     const finalDailyPointsData = await loadDailyPoints(config.sessionPath, account.email);
     if (finalDailyPointsData && finalDailyPointsData.date === todayStr) {
-        // 正确计算最终积分：现在保存的是总积分，优先使用移动端完成后的总积分
-        let finalPoints = finalDailyPointsData.mobileFinalPoints || finalDailyPointsData.desktopFinalPoints || finalDailyPointsData.initialPoints || 0;
+        // 正确计算最终积分：优先使用移动端完成后的总积分，如果没有则使用桌面端，最后使用初始积分
+        let finalPoints = 0;
+        if (finalDailyPointsData.mobileFinalPoints !== undefined) {
+            finalPoints = finalDailyPointsData.mobileFinalPoints;
+        } else if (finalDailyPointsData.desktopFinalPoints !== undefined) {
+            finalPoints = finalDailyPointsData.desktopFinalPoints;
+        } else {
+            finalPoints = finalDailyPointsData.initialPoints || 0;
+        }
         
         // 修复积分计算逻辑：即使初始积分为0，也要计算实际收益
         let dailyGain = 0;
@@ -4175,13 +4232,8 @@ async function processAccountPoints(account: Account, config: Config, todayStr: 
         
         // 修复收益计算逻辑
         if (finalDailyPointsData.desktopFinalPoints !== undefined) {
-            if (finalDailyPointsData.initialPoints > 0) {
-                // 如果有初始积分，计算差值
-                desktopGain = Math.max(0, finalDailyPointsData.desktopFinalPoints - finalDailyPointsData.initialPoints);
-            } else {
-                // 如果初始积分为0，桌面端收益就是桌面端最终积分
-                desktopGain = Math.max(0, finalDailyPointsData.desktopFinalPoints);
-            }
+            // 桌面端收益 = 桌面端最终积分 - 初始积分
+            desktopGain = Math.max(0, finalDailyPointsData.desktopFinalPoints - (finalDailyPointsData.initialPoints || 0));
         }
         
         if (finalDailyPointsData.mobileFinalPoints !== undefined) {
@@ -4190,11 +4242,7 @@ async function processAccountPoints(account: Account, config: Config, todayStr: 
                 mobileGain = Math.max(0, finalDailyPointsData.mobileFinalPoints - finalDailyPointsData.desktopFinalPoints);
             } else {
                 // 如果没有桌面端最终积分，移动端收益 = 移动端最终积分 - 初始积分
-                if (finalDailyPointsData.initialPoints > 0) {
-                    mobileGain = Math.max(0, finalDailyPointsData.mobileFinalPoints - finalDailyPointsData.initialPoints);
-                } else {
-                    mobileGain = Math.max(0, finalDailyPointsData.mobileFinalPoints);
-                }
+                mobileGain = Math.max(0, finalDailyPointsData.mobileFinalPoints - (finalDailyPointsData.initialPoints || 0));
             }
         }
         

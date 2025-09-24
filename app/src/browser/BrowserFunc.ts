@@ -239,8 +239,20 @@ export default class BrowserFunc {
                     points.readToEarn = parseInt(item.attributes.pointmax ?? '0') - parseInt(item.attributes.pointprogress ?? '0');
                 } else if (item.attributes.type === 'checkin') {
                     const checkInDay = parseInt(item.attributes.progress ?? '0') % 7;
-                    if (checkInDay < 6 && (new Date()).getDate() != (new Date(item.attributes.last_updated ?? '')).getDate()) {
-                        points.checkIn = parseInt(item.attributes['day_' + (checkInDay + 1) + '_points'] ?? '0');
+                    const today = new Date().getDate();
+                    const lastUpdated = new Date(item.attributes.last_updated ?? '').getDate();
+                    
+                    // 修复签到积分检测逻辑：
+                    // 1. 如果今天还没签到（last_updated不是今天），且还有可签到的天数，则显示可获得的积分
+                    // 2. 如果今天已经签到（last_updated是今天），则显示已获得的积分
+                    if (checkInDay < 6) {
+                        if (today != lastUpdated) {
+                            // 今天还没签到，显示可获得的积分
+                            points.checkIn = parseInt(item.attributes['day_' + (checkInDay + 1) + '_points'] ?? '0');
+                        } else {
+                            // 今天已经签到，显示已获得的积分
+                            points.checkIn = parseInt(item.attributes['day_' + checkInDay + '_points'] ?? '0');
+                        }
                     }
                 }
             }
