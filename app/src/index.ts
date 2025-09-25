@@ -3592,6 +3592,17 @@ async function runSingleAccountSearchTaskWithStagnationCheck(
                 await page.goto('https://rewards.bing.com', { waitUntil: 'domcontentloaded' });
                 await page.waitForTimeout(2000);
                 
+                // 检测并处理 chrome-error 页面
+                const rewardsUrl = page.url();
+                if (rewardsUrl.includes('chrome-error://') || rewardsUrl.includes('chromewebdata')) {
+                    log('main', '主流程', `[${account.email}] 检测到 chrome-error 页面: ${rewardsUrl}，尝试恢复...`, 'warn');
+                    const recovered = await bot.browser.func.handleChromeError(page, 'https://rewards.bing.com');
+                    if (!recovered) {
+                        log('main', '主流程', `[${account.email}] 无法从 chrome-error 页面恢复，跳过此账户`, 'error');
+                        return false;
+                    }
+                }
+                
                 // 根据参数决定是否进行登录检查
                 if (shouldCheckLogin) {
                     log('main', '主流程', `[${account.email}] 执行完整登录流程（包含登录检查）`);
@@ -3828,14 +3839,25 @@ async function runSingleAccountSearchTask(
                         await page.goto('https://www.bing.com', { waitUntil: 'domcontentloaded' });
                         await page.waitForTimeout(5000);
                         
+                        // 检测并处理 chrome-error 页面
+                        const bingUrl = page.url();
+                        if (bingUrl.includes('chrome-error://') || bingUrl.includes('chromewebdata')) {
+                            log('main', '主流程', `[${account.email}] 检测到 chrome-error 页面: ${bingUrl}，尝试恢复...`, 'warn');
+                            const recovered = await bot.browser.func.handleChromeError(page, 'https://www.bing.com');
+                            if (!recovered) {
+                                log('main', '主流程', `[${account.email}] 无法从 chrome-error 页面恢复，跳过此账户`, 'error');
+                                return false;
+                            }
+                        }
+                        
                         // 验证页面跳转是否成功
-                        const currentUrl = page.url();
+                        const finalUrl = page.url();
                         const pageTitle = await page.title();
-                        log('main', '主流程', `[${account.email}] 跳转后URL: ${currentUrl}`);
+                        log('main', '主流程', `[${account.email}] 跳转后URL: ${finalUrl}`);
                         log('main', '主流程', `[${account.email}] 跳转后标题: ${pageTitle}`);
                         
                         // 如果还在 Rewards 页面，强制跳转到 Bing 搜索页面
-                        if (currentUrl.includes('rewards.bing.com')) {
+                        if (finalUrl.includes('rewards.bing.com')) {
                             log('main', '主流程', `[${account.email}] 检测到仍在 Rewards 页面，强制跳转到 Bing 搜索页面...`);
                             await page.goto('https://www.bing.com', { waitUntil: 'networkidle' });
                             await page.waitForTimeout(3000);

@@ -90,6 +90,25 @@ export interface ConfigRecording {
     };
 }
 
+export interface ConfigCacheManagement {
+    // 是否在启动时清理浏览器缓存
+    clearCacheOnStart: boolean;
+    // 是否在检测到 chrome-error 时自动清理缓存
+    autoClearOnChromeError: boolean;
+    // 是否清理 localStorage
+    clearLocalStorage: boolean;
+    // 是否清理 sessionStorage
+    clearSessionStorage: boolean;
+    // 是否清理 IndexedDB
+    clearIndexedDB: boolean;
+    // 是否清理 Cache API
+    clearCacheAPI: boolean;
+    // 是否清理 Cookies
+    clearCookies: boolean;
+    // 是否清理权限
+    clearPermissions: boolean;
+}
+
 export interface Config {
     baseURL: string;
     sessionPath: string;
@@ -103,6 +122,7 @@ export interface Config {
     debug: boolean;
     saveFingerprint: ConfigSaveFingerprint;
     recording?: ConfigRecording;
+    cacheManagement?: ConfigCacheManagement;
     workers: ConfigWorkers;
     searchOnBingLocalQueries: boolean;
     globalTimeout: number | string;

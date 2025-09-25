@@ -34,6 +34,36 @@ class Browser {
                 '--accept-lang=zh-CN,zh,en-US,en',
                 '--disable-translate',
                 '--disable-ipc-flooding-protection',
+                // 缓存清理相关参数
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-background-networking',
+                '--disable-default-apps',
+                '--disable-extensions',
+                '--disable-sync',
+                '--disable-plugins',
+                '--disable-plugins-discovery',
+                '--disable-preconnect',
+                '--disable-hang-monitor',
+                '--disable-prompt-on-repost',
+                '--disable-domain-reliability',
+                '--disable-component-extensions-with-background-pages',
+                '--disable-background-downloads',
+                '--disable-client-side-phishing-detection',
+                '--disable-component-update',
+                '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+                '--disable-ipc-flooding-protection',
+                '--disable-logging',
+                '--disable-permissions-api',
+                '--disable-popup-blocking',
+                '--disable-prompt-on-repost',
+                '--disable-sync-preferences',
+                '--disable-web-resources',
+                '--disable-features=VizDisplayCompositor,TranslateUI',
+                '--aggressive-cache-discard',
+                '--memory-pressure-off',
+                '--max_old_space_size=4096',
                 // 移动端特殊参数：模拟Bing客户端
                 ...(this.bot.isMobile ? [
                     '--user-agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BingApp/1.0"',
@@ -184,6 +214,55 @@ class Browser {
 
         context.setDefaultTimeout(this.bot.utils.stringToMs(this.bot.config?.globalTimeout ?? 30000));
         await context.addCookies(sessionData.cookies);
+
+        // 根据配置清理浏览器缓存和存储
+        const cacheConfig = this.bot.config.cacheManagement;
+        if (cacheConfig?.clearCacheOnStart) {
+            try {
+                const pages = context.pages();
+                for (const page of pages) {
+                    try {
+                        // 清理页面缓存
+                        await page.evaluate(() => {
+                            // 清理 localStorage
+                            if (typeof localStorage !== 'undefined') {
+                                localStorage.clear();
+                            }
+                            // 清理 sessionStorage
+                            if (typeof sessionStorage !== 'undefined') {
+                                sessionStorage.clear();
+                            }
+                            // 清理 IndexedDB
+                            if (typeof indexedDB !== 'undefined') {
+                                indexedDB.databases().then(databases => {
+                                    databases.forEach(db => {
+                                        if (db.name) {
+                                            indexedDB.deleteDatabase(db.name);
+                                        }
+                                    });
+                                }).catch(() => {
+                                    // 忽略 IndexedDB 清理错误
+                                });
+                            }
+                        });
+                    } catch (error) {
+                        // 忽略页面缓存清理错误
+                    }
+                }
+                
+                // 清理浏览器上下文缓存
+                if (cacheConfig.clearCookies) {
+                    await context.clearCookies();
+                }
+                if (cacheConfig.clearPermissions) {
+                    await context.clearPermissions();
+                }
+                
+                this.bot.log(this.bot.isMobile, '浏览器', `[${email}] 已根据配置清理浏览器缓存和存储数据`);
+            } catch (error) {
+                this.bot.log(this.bot.isMobile, '浏览器', `[${email}] 清理浏览器缓存时出现错误: ${error}`, 'warn');
+            }
+        }
 
         if (this.bot.config.saveFingerprint) {
             await saveFingerprintData(this.bot.config.sessionPath, email, this.bot.isMobile, fingerprint);

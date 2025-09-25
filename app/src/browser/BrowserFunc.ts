@@ -22,6 +22,18 @@ export default class BrowserFunc {
             try {
                 const navigationTimeoutMs = this.bot.utils.stringToMs(this.bot.config.navigationTimeout);
                 await page.goto(url, { timeout: navigationTimeoutMs, waitUntil: 'domcontentloaded' });
+                
+                // 检查是否出现 chrome-error 页面
+                const currentUrl = page.url();
+                if (currentUrl.includes('chrome-error://') || currentUrl.includes('chromewebdata')) {
+                    this.bot.log(this.bot.isMobile, '页面导航', `检测到 chrome-error 页面: ${currentUrl}，尝试清理缓存并重试`, 'warn');
+                    await this.clearPageCache(page);
+                    if (i < retries - 1) {
+                        await this.bot.utils.wait(2000);
+                        continue;
+                    }
+                }
+                
                 return; 
             } catch (error) {
                 this.bot.log(this.bot.isMobile, '页面导航', `导航到 ${url} 失败，尝试次数 ${i + 1}/${retries}。错误: ${error}`, 'warn');
@@ -317,6 +329,126 @@ export default class BrowserFunc {
             this.bot.log(this.bot.isMobile, '获取打卡活动', `发生错误: ${error}`, 'error')
         }
         return selector
+    }
+
+    /**
+     * 清理页面缓存和存储数据
+     */
+    async clearPageCache(page: Page) {
+        try {
+            this.bot.log(this.bot.isMobile, '缓存清理', '开始清理页面缓存和存储数据...');
+            
+            const cacheConfig = this.bot.config.cacheManagement;
+            
+            // 清理页面级别的存储
+            await page.evaluate(() => {
+                try {
+                    // 清理 localStorage
+                    if (typeof localStorage !== 'undefined') {
+                        localStorage.clear();
+                    }
+                    // 清理 sessionStorage
+                    if (typeof sessionStorage !== 'undefined') {
+                        sessionStorage.clear();
+                    }
+                    // 清理 IndexedDB
+                    if (typeof indexedDB !== 'undefined') {
+                        indexedDB.databases().then(databases => {
+                            databases.forEach(db => {
+                                if (db.name) {
+                                    indexedDB.deleteDatabase(db.name);
+                                }
+                            });
+                        }).catch(() => {
+                            // 忽略 IndexedDB 清理错误
+                        });
+                    }
+                    // 清理 WebSQL (如果存在)
+                    if (typeof openDatabase !== 'undefined') {
+                        // WebSQL 已废弃，但为了兼容性保留
+                    }
+                    // 清理 Cache API
+                    if (typeof caches !== 'undefined') {
+                        caches.keys().then(cacheNames => {
+                            cacheNames.forEach(cacheName => {
+                                caches.delete(cacheName);
+                            });
+                        }).catch(() => {
+                            // 忽略 Cache API 清理错误
+                        });
+                    }
+                } catch (error) {
+                    console.warn('清理页面存储时出现错误:', error);
+                }
+            });
+            
+            // 清理浏览器上下文级别的数据
+            const context = page.context();
+            try {
+                if (cacheConfig?.clearCookies !== false) {
+                    await context.clearCookies();
+                }
+                if (cacheConfig?.clearPermissions !== false) {
+                    await context.clearPermissions();
+                }
+            } catch (error) {
+                this.bot.log(this.bot.isMobile, '缓存清理', `清理上下文数据时出现错误: ${error}`, 'warn');
+            }
+            
+            this.bot.log(this.bot.isMobile, '缓存清理', '页面缓存和存储数据清理完成');
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '缓存清理', `清理页面缓存时出现错误: ${error}`, 'warn');
+        }
+    }
+
+    /**
+     * 检测并处理 chrome-error 页面
+     */
+    async handleChromeError(page: Page, originalUrl: string): Promise<boolean> {
+        try {
+            const currentUrl = page.url();
+            if (currentUrl.includes('chrome-error://') || currentUrl.includes('chromewebdata')) {
+                this.bot.log(this.bot.isMobile, '错误处理', `检测到 chrome-error 页面: ${currentUrl}，尝试恢复...`);
+                
+                const cacheConfig = this.bot.config.cacheManagement;
+                
+                // 根据配置决定是否自动清理缓存
+                if (cacheConfig?.autoClearOnChromeError !== false) {
+                    // 清理缓存
+                    await this.clearPageCache(page);
+                    
+                    // 等待一段时间
+                    await this.bot.utils.wait(3000);
+                } else {
+                    this.bot.log(this.bot.isMobile, '错误处理', '配置禁用了自动缓存清理，跳过清理步骤');
+                }
+                
+                // 尝试重新导航到原始URL
+                try {
+                    await page.goto(originalUrl, { 
+                        waitUntil: 'domcontentloaded', 
+                        timeout: 30000 
+                    });
+                    
+                    // 检查是否成功恢复
+                    const newUrl = page.url();
+                    if (!newUrl.includes('chrome-error://') && !newUrl.includes('chromewebdata')) {
+                        this.bot.log(this.bot.isMobile, '错误处理', `成功从 chrome-error 页面恢复，当前URL: ${newUrl}`);
+                        return true;
+                    } else {
+                        this.bot.log(this.bot.isMobile, '错误处理', `恢复失败，仍然在错误页面: ${newUrl}`, 'warn');
+                        return false;
+                    }
+                } catch (error) {
+                    this.bot.log(this.bot.isMobile, '错误处理', `重新导航失败: ${error}`, 'warn');
+                    return false;
+                }
+            }
+            return true; // 没有检测到错误页面
+        } catch (error) {
+            this.bot.log(this.bot.isMobile, '错误处理', `处理 chrome-error 时出现异常: ${error}`, 'error');
+            return false;
+        }
     }
 
     async closeBrowser(browser: BrowserContext, email: string) {
